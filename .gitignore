@@ -1,0 +1,24 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# The Bosch LDI specification is not ours to redistribute. See docs/README.md.
+docs/*.pdf
+
+# Machine-specific editor state. The committed .vscode files are portable;
+# local overrides (IDF paths, serial port) belong outside version control.
+.vscode/settings.local.json
+.vscode/launch.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.cache/
+compile_commands.json
+*.swp
+Thumbs.db

@@ -1,0 +1,109 @@
+# =====================================================================
+#  Bosch eBike LDI -> BLE Cycling Power bridge
+#  Target-independent configuration.  ESP32-C3-specific settings live in
+#  sdkconfig.defaults.esp32c3
+#
+#  NOTE: sdkconfig.defaults is only consulted when `sdkconfig` does NOT
+#  exist.  After editing this file you MUST delete sdkconfig (or run
+#  `idf.py fullclean`) or the change is silently ignored.
+# =====================================================================
+
+# ---------- Flash / partitions ----------------------------------------
+# Custom table (partitions.csv): the SINGLE_APP_LARGE layout plus a 2.4 MB
+# "capture" partition, so the bridge can record BLE traffic to flash while
+# running standalone on a power bank and be read back later over serial.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---------- Bluetooth host: NimBLE -----------------------------------
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# Do NOT add CONFIG_BT_BLUEDROID_ENABLED=n -- it is in the same
+# `choice BT_HOST` group, so selecting NimBLE already deselects it.
+# Do NOT add CONFIG_BTDM_CTRL_MODE_* -- those symbols exist only in
+# components/bt/controller/esp32/Kconfig.in and are dead on the C3.
+
+# ---------- Dual role: central (bike) + peripheral (watch) -----------
+# All four already default to y.  Stated explicitly because simultaneous
+# central+peripheral operation is the entire point of this firmware and a
+# future default flip must not silently break it.
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+
+# Two links: the bike and the watch.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+
+# Legacy advertising only.  The Suunto Race S scans legacy 1M PHY when it
+# looks for a power pod; extended advertising would make us invisible to it.
+CONFIG_BT_NIMBLE_EXT_ADV=n
+
+# ---------- MTU / Data Length Extension ------------------------------
+# 247 ATT payload + 4 bytes L2CAP header = 251 = max LL payload with DLE.
+# Larger only buys L2CAP fragmentation.  IDF default is 256.
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+# C3 default is 12 blocks of 256 B.  Two links both running large PDUs.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=20
+
+# ---------- Security: LE Secure Connections, Just Works ---------------
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_SM_LEGACY=y
+CONFIG_BT_NIMBLE_SM_SC_DEBUG_KEYS=n
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_ENCRYPTION=y
+
+# !! DELIBERATELY LEFT AT THE DEFAULT 0.  DO NOT RAISE THIS. !!
+# ble_att_svr.c silently DISCARDS incoming notifications and indications
+# when BLE_SM_LVL >= 2 and the link is not encrypted:
+#     if (MYNEWT_VAL(BLE_SM_LVL) >= 2 && !sec_state.encrypted) return 0;
+# No error, no log.  It is global to both roles, so "hardening" this would
+# make the bike's LDI notifications vanish with the connection still
+# looking perfectly healthy.  Encryption is enforced per-connection in
+# ldi_client.c via ble_gap_security_initiate() instead.
+CONFIG_BT_NIMBLE_SM_LVL=0
+
+# ---------- Bond storage in NVS --------------------------------------
+# Kconfig default is n.  Without this bonds live in RAM only: everything
+# works, you reboot, the watch reconnects with an LTK we no longer hold,
+# gets rejected, and drops the sensor with nothing on screen to explain it.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+CONFIG_BT_NIMBLE_MAX_BONDS=4
+CONFIG_BT_NIMBLE_MAX_CCCDS=8
+
+# ---------- GAP service advertised values ----------------------------
+# 0x0484 = (Category 0x12 Cycling << 6) | 0x04 Power Sensor.
+# Also set at runtime via ble_svc_gap_device_appearance_set(); belt and braces.
+CONFIG_BT_NIMBLE_SVC_GAP_APPEARANCE=0x0484
+
+# Peripheral Preferred Connection Parameters.  All default to 0 = "no
+# preference".  Units: interval 1.25 ms, supervision timeout 10 ms.
+#   24  * 1.25 ms =   30 ms
+#   40  * 1.25 ms =   50 ms
+#   400 * 10   ms = 4000 ms
+CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MIN_CONN_INTERVAL=24
+CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MAX_CONN_INTERVAL=40
+CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SLAVE_LATENCY=0
+CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SUPERVISION_TMO=400
+
+# ---------- Connection re-attempt ------------------------------------
+# Defaults to y on ESP32-C3 with MAX_CONN_REATTEMPT=3.  We own reconnect
+# policy in the bridge supervisor, so disable the built-in retries rather
+# than stacking two backoffs on top of each other.
+CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=n
+
+# ---------- Host task -------------------------------------------------
+# The CPS notify callout, the simulator tick and the LDI protobuf decode
+# all run on the NimBLE host task.  Trim later with
+# uxTaskGetStackHighWaterMark().
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=5120
+
+# ---------- Main task -------------------------------------------------
+# bridge_start() runs on the main task and touches NVS, the capture log and
+# the NimBLE host config.  The 3584-byte default is uncomfortably tight; a
+# 4096-byte automatic in capture_init() already overflowed it once.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# ---------- Logging ---------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y

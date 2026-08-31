@@ -1,0 +1,22 @@
+# =====================================================================
+#  ESP32-C3 SuperMini specific configuration
+# =====================================================================
+
+# ---------- Console over the native USB Serial/JTAG -------------------
+# The C3 SuperMini has NO USB-UART bridge; its USB-C port goes straight to
+# the on-chip USB Serial/JTAG peripheral (GPIO18/19), so UART0 output goes
+# nowhere.  Primary (not secondary) so stdin works for the diagnostic
+# console -- `bonds clear` and the `sim` commands need it.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ---------- Flash size ------------------------------------------------
+# VERIFY WITH `esptool.py flash_id` BEFORE TRUSTING THIS.  SuperMini boards
+# usually ship 4 MB, but clones vary and the reference blink project on this
+# machine is configured for 2 MB.  SINGLE_APP_LARGE needs >= 2 MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# ---------- Controller activity slots ---------------------------------
+# "Activities" = 2 connections + scan + adv = 4.  Default 6 leaves headroom
+# at ~828 bytes each.  NOTE: on the C3 these are BT_CTRL_* symbols, not the
+# BTDM_CTRL_* ones the NimBLE examples carry (those are ESP32-classic only).
+CONFIG_BT_CTRL_BLE_MAX_ACT=6

@@ -1,0 +1,90 @@
+// Transcribed verbatim from the Bosch LDI specification v1.0 (2026-05-01),
+// section 2.4 ebike_live_data.proto, in docs/.
+//
+// Kept as reference only. The firmware does NOT generate code from this: the
+// decoder in components/ldi_proto/ is a hand-written field scanner, which is
+// both dependency-free and inherently tolerant of the unknown fields the spec
+// explicitly requires clients to ignore (section 2.2.4.3).
+//
+// Original header:
+//   SPDX-Copyright-Text: 2026 Robert Bosch GmbH
+//   SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package com.bosch.ebike;
+
+enum LightState {
+    LIGHT_STATE_INVALID = 0;
+    LIGHT_STATE_OFF = 1;
+    LIGHT_STATE_ON = 2;
+}
+
+message LiveData {
+    /*
+     * The bike speed in km/h.
+     * Unit: 1/100 km/h
+     * Range: 0 to 655.35 km/h
+     */
+    optional uint32 speed = 1;
+    /*
+     * The cadence of the rider.
+     * Unit: 1 rpm
+     * Range: -32768 to 32767 rpm
+     */
+    optional int32 cadence = 2;
+    /*
+     * The present power of the rider.
+     * Unit: 1 W
+     * Range: 0 to 65535 W
+     */
+    optional uint32 rider_power = 5;
+    /*
+     * The ambient brightness in lux.
+     * Unit: 1/1000 lux
+     * Range: 0 to 4294967.295 lux
+     */
+    optional uint32 ambient_brightness = 9;
+    /*
+     * The battery state of charge.
+     * Unit: 1 %
+     * Range: 0 to 100 %
+     */
+    optional uint32 battery_soc = 10;
+    /*
+     * The current time (UTC).
+     * Unit: 1 second (since 1.1.1970)
+     */
+    optional int64 time = 11;
+    /*
+     * The total distance in meters.
+     * Unit: 1 meter
+     * Range: 0 to 4294967295 meters
+     */
+    optional uint32 odometer = 12;
+
+    // The bike light state.
+    optional LightState bike_light = 17;
+    // True, if the system is in a locked state.
+    optional bool system_locked = 21;
+    // True, if the charger is currently connected. This doesn't necessarily
+    // mean that the bike is currently charging (e.g. when battery is already
+    // full).
+    optional bool charger_connected = 22;
+    // True, if the light reserve state is active.
+    optional bool light_reserve_state = 23;
+    // True, if the Diagnosis Tool is currently connected to the bike. This is
+    // usually the case at the bike dealer/repair center.
+    optional bool diagnosis_program_active = 24;
+    // True, if bike is standing still. The bike might still be slightly
+    // moving, depending on the sensor accuracy.
+    optional bool bike_not_driving = 25;
+}
+
+// From section 2.5 ebike_live_data.options (nanopb generator hints):
+//   speed              int_size:IS_16
+//   cadence            int_size:IS_16
+//   rider_power        int_size:IS_16
+//   ambient_brightness int_size:IS_32
+//   battery_soc        int_size:IS_8
+//   odometer           int_size:IS_32

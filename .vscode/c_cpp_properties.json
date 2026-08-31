@@ -1,0 +1,15 @@
+{
+  "configurations": [
+    {
+      "name": "ESP-IDF",
+      // Driven entirely by the build's compile_commands.json, so it needs no
+      // hardcoded toolchain path or version and works on any machine after a
+      // first `idf.py build`.
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+      "includePath": ["${workspaceFolder}/**"],
+      "cStandard": "c17",
+      "cppStandard": "c++17"
+    }
+  ],
+  "version": 4
+}

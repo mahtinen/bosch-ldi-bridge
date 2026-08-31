@@ -1,0 +1,58 @@
+menu "Bosch bridge"
+
+    config BRIDGE_ENABLE_LDI
+        bool "Build the Bosch LDI central (bike side)"
+        default y
+        help
+            When disabled, a no-op stub is linked instead and the firmware
+            runs as a watch-only CPS peripheral with no dependency on the
+            Bosch specification. Phase 1 shipped with this off.
+
+    config BRIDGE_DLE_BEFORE_MTU
+        bool "Request data length extension before the ATT MTU exchange"
+        default y
+        help
+            Negotiating a large ATT MTU while the link-layer payload is still
+            27 octets forces L2CAP fragmentation. That should work, but it is
+            the configuration under which truncation was reported against
+            early bike firmware. Flip this during bring-up if the bike
+            dislikes the order.
+
+    config BRIDGE_MIN_ATT_MTU
+        int "Minimum acceptable negotiated ATT MTU on the bike link"
+        default 100
+        range 23 517
+
+    config BRIDGE_MIN_LL_RX_OCTETS
+        int "Minimum acceptable negotiated LL max_rx_octets on the bike link"
+        default 100
+        range 27 251
+        help
+            RX, not TX: the bike's notifications arrive on our receive path,
+            so a wide TX with a narrow RX still truncates the stream.
+
+    config BRIDGE_LINK_VERIFY_TIMEOUT_MS
+        int "Timeout waiting for DATA_LEN_CHG / MTU"
+        default 3000
+        range 500 20000
+
+    config BRIDGE_MAX_DISCOVERED_CHRS
+        int "Maximum characteristics recorded during discovery"
+        default 32
+        range 8 128
+
+    config BRIDGE_STALE_MS
+        int "Treat a bike field as stale after this many ms"
+        default 3000
+
+    config BRIDGE_LED_GPIO
+        int "Status LED GPIO"
+        default 8
+
+    config BRIDGE_LED_ACTIVE_LOW
+        bool "Status LED is active low"
+        default y
+        help
+            Confirmed active low on the ESP32-C3 SuperMini.
+
+endmenu

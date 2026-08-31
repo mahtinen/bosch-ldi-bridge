@@ -1,0 +1,27 @@
+{
+  // Portable settings only. The ESP-IDF extension also needs to know where
+  // your IDF install and its Python environment live, but those are per-machine
+  // and belong in your USER settings, not in the repository:
+  //
+  //   "idf.espIdfPath"    / "idf.espIdfPathWin"
+  //   "idf.pythonBinPath" / "idf.pythonBinPathWin"
+  //   "idf.toolsPath"     / "idf.toolsPathWin"
+  //   "idf.port"          / "idf.portWin"
+  //
+  // If you keep several ESP-IDF versions side by side, note that the
+  // extension's selected version is a global setting -- pin per-project by
+  // adding the three path keys above to this file locally (and not committing
+  // them).
+  "idf.adapterTargetName": "esp32c3",
+  "idf.openOcdConfigs": ["board/esp32c3-builtin.cfg"],
+
+  // UART over the C3's native USB Serial/JTAG is simpler and faster than JTAG
+  // for routine flashing. Switch to "JTAG" only for OpenOCD debugging.
+  "idf.flashType": "UART",
+
+  "C_Cpp.intelliSenseEngine": "default",
+  "files.associations": {
+    "freertos.h": "c",
+    "*.h": "c"
+  }
+}

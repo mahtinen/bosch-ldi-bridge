@@ -1,0 +1,11 @@
+# Custom table: the stock SINGLE_APP_LARGE layout plus a large "capture"
+# data partition, so the bridge can log BLE traffic to flash while running
+# standalone on a power bank and be read back later over serial.
+#
+# 4 MB flash. Offsets must stay 0x1000-aligned for data, 0x10000 for app.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x180000,
+capture,    data, 0x40,    0x190000, 0x270000,

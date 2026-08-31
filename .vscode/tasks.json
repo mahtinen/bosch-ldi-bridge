@@ -1,0 +1,171 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build - Build project",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "${config:idf.espIdfPathWin}\\tools\\idf.py",
+                "build"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                {
+                    "owner": "cpp",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(.*?):(\\d+):(\\d*):?\\s+(?:fatal\\s+)?(warning|error):\\s+(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5
+                    }
+                }
+            ]
+        },
+        {
+            "label": "Set ESP-IDF Target",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "${config:idf.espIdfPathWin}\\tools\\idf.py",
+                "set-target",
+                "esp32c3"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Clean - Clean the project",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "${config:idf.espIdfPathWin}\\tools\\idf.py",
+                "fullclean"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash - Flash the device",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "${config:idf.espIdfPathWin}\\tools\\idf.py",
+                "-p",
+                "${config:idf.portWin}",
+                "flash"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Monitor: Start the monitor",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "${config:idf.espIdfPathWin}\\tools\\idf.py",
+                "-p",
+                "${config:idf.portWin}",
+                "monitor"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "dependsOn": "Flash - Flash the device",
+            "problemMatcher": []
+        },
+        {
+            "label": "Erase bonds - wipe the NVS partition",
+            "detail": "Clears NimBLE's stored bonds so the watch can be paired from scratch. Much faster than erase-flash, and keeps the app in place.",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "${config:idf.espIdfPathWin}\\components\\partition_table\\parttool.py",
+                "--port",
+                "${config:idf.portWin}",
+                "erase_partition",
+                "--partition-name",
+                "nvs"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash size - read the actual chip",
+            "detail": "Confirms CONFIG_ESPTOOLPY_FLASHSIZE_4MB matches the real board before you trust it.",
+            "type": "shell",
+            "command": "${config:idf.pythonBinPathWin}",
+            "args": [
+                "-m",
+                "esptool",
+                "--port",
+                "${config:idf.portWin}",
+                "flash_id"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "OpenOCD: Start openOCD",
+            "type": "shell",
+            "command": "openocd",
+            "args": [
+                "-f",
+                "board/esp32c3-builtin.cfg"
+            ],
+            "options": {
+                "cwd": "${config:idf.toolsPathWin}\\tools\\openocd-esp32",
+                "env": {
+                    "PATH": "${env:PATH};${config:idf.customExtraPaths}"
+                }
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^.*$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "\\bStarting\\b",
+                    "endsPattern": "\\bListening on port\\b"
+                }
+            }
+        }
+    ]
+}
