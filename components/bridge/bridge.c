@@ -90,6 +90,9 @@ static void bridge_status_timer_cb(void *arg)
      * Pulse counts, so a state can be read by counting rather than by judging
      * a blink rate.
      */
+    /* Cheap, and the one thing that recovers a watch that wandered off. */
+    cps_server_adv_watchdog();
+
     bool watch = cps_server_is_connected();
     bool bike  = ldi_client_is_connected();
 

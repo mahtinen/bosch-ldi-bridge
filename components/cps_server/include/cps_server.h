@@ -29,6 +29,18 @@ bool cps_server_is_connected(void);
 /* Has the watch subscribed to CP Measurement notifications? */
 bool cps_server_is_notifying(void);
 
+/*
+ * Verify we are actually advertising when we ought to be, and restart if not.
+ * Call periodically.
+ *
+ * Restarting advertising from the disconnect handler is not sufficient on its
+ * own: if that one call fails, nothing is listening for the watch any more and
+ * nothing ever tries again. A long ride lost the watch 33 minutes in and never
+ * recovered it while the bike streamed on regardless, which is exactly the
+ * shape of that failure.
+ */
+void cps_server_adv_watchdog(void);
+
 /* Terminate the watch link.  Advertising restarts from the disconnect event. */
 void cps_server_disconnect(void);
 

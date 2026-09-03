@@ -1,4 +1,5 @@
 #include "cps_server.h"
+#include "capture.h"
 #include "cps_ctrl_point.h"
 #include "cps_gatt.h"
 #include "cps_source.h"
@@ -108,12 +109,17 @@ void cps_server_start_adv(void)
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv_params,
                            cps_server_gap_event, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "adv_start rc=%d", rc);
+        /* Silently failing here is how a watch never comes back: the
+         * disconnect handler restarts advertising, and if that restart fails
+         * nothing is listening for the watch any more. */
+        ESP_LOGE(TAG, "adv_start rc=%d -- NOT ADVERTISING", rc);
+        capture_event("adv_start FAILED rc=%d", rc);
         return;
     }
 
     ESP_LOGI(TAG, "advertising as \"%s\" svc=0x%04X appearance=0x%04X",
              name, CPS_SVC_UUID16, fields.appearance);
+    capture_event("advertising started");
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,6 +257,16 @@ static int cps_server_gap_event(struct ble_gap_event *event, void *arg)
             s_notify_enabled        = false;
             s_conn_params_requested = false;
             cps_log_conn_desc("WATCH CONNECTED", s_conn_handle);
+            {
+                struct ble_gap_conn_desc d;
+                if (ble_gap_conn_find(s_conn_handle, &d) == 0) {
+                    capture_event("watch connect itvl=%u latency=%u timeout=%u "
+                                  "enc=%d bonded=%d",
+                                  d.conn_itvl, d.conn_latency,
+                                  d.supervision_timeout,
+                                  d.sec_state.encrypted, d.sec_state.bonded);
+                }
+            }
         } else {
             ESP_LOGW(TAG, "connect failed status=%d, re-advertising",
                      event->connect.status);
@@ -259,7 +275,16 @@ static int cps_server_gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "WATCH DISCONNECTED reason=%d", event->disconnect.reason);
+        /*
+         * The reason matters more than the fact. A long ride once lost the
+         * watch 33 minutes in and never got it back, and the reason had not
+         * been recorded -- leaving no way to tell a supervision timeout (0x08,
+         * RF or a stalled host) from the watch deliberately hanging up (0x13),
+         * which need completely different fixes.
+         */
+        ESP_LOGI(TAG, "WATCH DISCONNECTED reason=0x%02x", event->disconnect.reason);
+        capture_event("watch disconnect reason=0x%02x notifying_was=%d",
+                      event->disconnect.reason, s_notify_enabled ? 1 : 0);
         cps_ctrl_point_on_disconnect(event->disconnect.conn.conn_handle);
         s_conn_handle           = BLE_HS_CONN_HANDLE_NONE;
         s_notify_enabled        = false;
@@ -275,8 +300,18 @@ static int cps_server_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == g_cps_measurement_handle) {
             s_notify_enabled = event->subscribe.cur_notify;
-            ESP_LOGI(TAG, "CP Measurement notifications %s",
-                     s_notify_enabled ? "ENABLED" : "disabled");
+            ESP_LOGI(TAG, "CP Measurement notifications %s (reason=%d)",
+                     s_notify_enabled ? "ENABLED" : "disabled",
+                     event->subscribe.reason);
+            /*
+             * reason 3 is BLE_GAP_SUBSCRIBE_REASON_RESTORE: a bonded peer
+             * reconnected and NimBLE reinstated its stored CCCD without the
+             * peer writing it again. Worth recording, because after a watch
+             * pause/resume it distinguishes "the watch came back and
+             * resubscribed" from "the watch never came back at all".
+             */
+            capture_event("watch subscribe notify=%d reason=%d",
+                          s_notify_enabled ? 1 : 0, event->subscribe.reason);
             if (s_notify_enabled && !s_conn_params_requested) {
                 /* Let the watch finish discovery before asking. */
                 (void)esp_timer_start_once(s_connparam_timer,
@@ -375,6 +410,31 @@ void cps_server_get_counters(int16_t *out_power_w, uint16_t *out_cum_rev,
         *out_power_w = s.valid ? s.power_w : 0;
     }
     crank_model_get(&s_crank, out_cum_rev, out_last_evt_1024);
+}
+
+void cps_server_adv_watchdog(void)
+{
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        return; /* connected: not supposed to be advertising */
+    }
+    if (ble_gap_adv_active()) {
+        return; /* all is well */
+    }
+
+    /*
+     * Not connected and not advertising: the watch cannot possibly find us.
+     * Rate-limited so a persistently failing restart does not fill the log.
+     */
+    static int64_t last_try_us;
+    int64_t now = esp_timer_get_time();
+    if (last_try_us != 0 && (now - last_try_us) < 5 * 1000 * 1000) {
+        return;
+    }
+    last_try_us = now;
+
+    ESP_LOGW(TAG, "not connected and not advertising -- restarting");
+    capture_event("adv watchdog: advertising was OFF, restarting");
+    cps_server_start_adv();
 }
 
 void cps_server_disconnect(void)

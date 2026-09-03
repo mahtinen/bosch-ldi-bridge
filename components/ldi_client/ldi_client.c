@@ -22,6 +22,9 @@
 
 static const char *TAG = "ldi";
 
+#ifndef CONFIG_BRIDGE_CAPTURE_PAYLOAD_MS
+#define CONFIG_BRIDGE_CAPTURE_PAYLOAD_MS 1000
+#endif
 #ifndef CONFIG_BRIDGE_MAX_DISCOVERED_CHRS
 #define CONFIG_BRIDGE_MAX_DISCOVERED_CHRS 32
 #endif
@@ -78,6 +81,11 @@ static uint16_t   s_ldi_handle = BLE_HS_CONN_HANDLE_NONE;
 static bike_state_t s_bike;
 static uint32_t     s_decode_ok;
 static uint32_t     s_decode_err;
+
+/* Payloads deliberately not written to flash; see the rate limit in the
+ * notification handler. Counted so the log cannot misrepresent the real rate. */
+static uint32_t     s_notify_skipped;
+
 static uint8_t  s_own_addr_type;
 static bool     s_dump = true;
 static bool     s_scanning;
@@ -741,11 +749,40 @@ static int ldi_gap_event(struct ble_gap_event *event, void *arg)
         }
         s_notify_total++;
 
+        /*
+         * Capture payloads at about 1 Hz, not at the full notification rate.
+         *
+         * While riding, the bike notifies at roughly 4 Hz -- one 80-minute ride
+         * produced 20,112 notifications and 1.45 MB of flash writes. Every one
+         * of those is a synchronous esp_partition_write from the NimBLE host
+         * task, and crossing a sector boundary adds a blocking 4 KB erase that
+         * stalls the CPU with the cache disabled. That is a lot of jitter to
+         * inject into the timing of the very link being measured.
+         *
+         * 1 Hz is all the protocol analysis ever needed, and events (connects,
+         * disconnects, decode failures, link quality) are still captured in
+         * full because they are rare. Skipped frames are counted so the log
+         * does not silently misrepresent the true rate.
+         */
         {
-            uint8_t cap[256];
-            uint16_t n = len < sizeof(cap) ? len : sizeof(cap);
-            if (os_mbuf_copydata(event->notify_rx.om, 0, n, cap) == 0) {
-                capture_notify(event->notify_rx.attr_handle, cap, n);
+            static int64_t last_cap_us;
+            int64_t now_us = esp_timer_get_time();
+
+            if (last_cap_us == 0 ||
+                (now_us - last_cap_us) >= CONFIG_BRIDGE_CAPTURE_PAYLOAD_MS * 1000) {
+                uint8_t cap[256];
+                uint16_t n = len < sizeof(cap) ? len : sizeof(cap);
+                if (os_mbuf_copydata(event->notify_rx.om, 0, n, cap) == 0) {
+                    capture_notify(event->notify_rx.attr_handle, cap, n);
+                }
+                if (s_notify_skipped) {
+                    capture_event("(%lu payload(s) not captured since the last)",
+                                  (unsigned long)s_notify_skipped);
+                    s_notify_skipped = 0;
+                }
+                last_cap_us = now_us;
+            } else {
+                s_notify_skipped++;
             }
         }
 

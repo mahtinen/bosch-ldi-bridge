@@ -231,6 +231,13 @@ free from bosch-ebike.com → Service → Downloads → LiveData and drop it in
   10–20 minutes. Sessions ending this way appear in the log as `poweron` reset
   reasons. A bank with a trickle/low-current mode, or a small dummy load, fixes
   it. Nothing in firmware can convince a bank that 70 mA is a real device.
+- **Pausing the activity on the watch may end the recording.** On at least one
+  Suunto, pausing dropped the sensor link and resuming never re-acquired it —
+  the bike kept streaming to the bridge for another 47 minutes while nothing
+  reached the watch. The bridge now runs an advertising watchdog so it stays
+  discoverable, and logs the watch's disconnect reason and subscribe reason so
+  the cause can be identified. If you pause, glance at the LED afterwards: three
+  pulses means only the bike is connected.
 - **One watch at a time.** The CPS server tracks a single connection, so a watch
   *and* a head unit cannot both read it simultaneously. Fixable by iterating an
   array of subscribers.
