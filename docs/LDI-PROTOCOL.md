@@ -227,3 +227,60 @@ of it.
   bike initiating the connection. This implementation does the reverse and
   connects as a central. It works — bonded, encrypted, streaming — but is not the
   specified flow, and is the likeliest reason Flow does not register it.
+
+
+---
+
+# The watch link, observed
+
+Not part of the Bosch protocol, but recorded here because it caused the most
+confusing failure in this project and the numbers are not what you would guess.
+
+## A watch may impose a very short connection interval
+
+```
+watch connect itvl=8 latency=0 timeout=500 enc=0 bonded=0
+```
+
+`itvl=8` is **10 ms** — 100 connection events per second — imposed by the watch
+despite the bridge requesting 30–50 ms and publishing PPCP saying the same. The
+peripheral only gets to ask.
+
+That rate shares one radio with the bike link. Combined with per-notification
+flash writes it is a plausible source of the supervision timeouts below, which
+is why payload capture is now rate-limited.
+
+`enc=0 bonded=0`: at least one watch pairs as a "power pod" without any SMP
+bonding at all. Not requiring encryption on the CPS characteristics is therefore
+load-bearing, not merely permissive — requiring it would have made this watch
+fail with a confusing symptom. It also means CCCDs are never persisted, so
+subscribes always arrive as `reason=1` (write) rather than `reason=3` (restore).
+
+## Disconnect reasons are NimBLE-encoded
+
+NimBLE reports HCI reasons offset by `0x200`:
+
+| Logged | HCI | Meaning |
+|---|---|---|
+| `0x208` | 0x08 | supervision timeout — RF, or a stalled host |
+| `0x213` | 0x13 | remote user terminated — the watch hung up deliberately |
+| `0x216` | 0x16 | local host terminated |
+| `0x23e` | 0x3E | failed to establish |
+
+Both `0x208` and `0x213` were observed within five minutes of each other, so
+treating any single disconnect as diagnostic is a mistake — the reason is what
+separates "we broke" from "the watch chose to leave".
+
+## Pausing an activity drops the sensor
+
+Pausing on the watch disconnects it. It normally reconnects on resume, observed
+taking about **13 seconds**.
+
+One 48-minute ride recorded only 24 minutes: the watch dropped at 33 minutes and
+never returned, while the bike streamed on for another 47. Advertising is
+restarted from the disconnect handler, and a watchdog now also restarts it if it
+is ever found off while disconnected — but in later successful tests the
+watchdog never had to fire, so that failure has **not** been reproduced and its
+cause is not established.
+
+If you pause, glance at the LED: three pulses means only the bike is connected.

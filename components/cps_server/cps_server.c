@@ -158,6 +158,7 @@ static void cps_request_conn_params(struct ble_npl_event *ev)
     if (rc != 0) {
         ESP_LOGW(TAG, "update_params rc=%d (accepting what the watch chose)", rc);
     }
+    capture_event("watch conn param request rc=%d (want 30-50ms, latency 0)", rc);
 }
 
 static void cps_connparam_timer_cb(void *arg)
@@ -293,9 +294,25 @@ static int cps_server_gap_event(struct ble_gap_event *event, void *arg)
         cps_server_start_adv();
         return 0;
 
-    case BLE_GAP_EVENT_CONN_UPDATE:
+    case BLE_GAP_EVENT_CONN_UPDATE: {
         cps_log_conn_desc("conn params updated", event->conn_update.conn_handle);
+        /*
+         * Worth logging: the watch is the central and picks the interval. One
+         * was observed imposing itvl=8, i.e. 10 ms -- 100 connection events a
+         * second, against the 30-50 ms requested here. Sharing a radio with the
+         * bike link at that rate is a plausible source of the supervision
+         * timeouts (disconnect reason 0x208) seen mid-ride.
+         */
+        struct ble_gap_conn_desc d;
+        if (ble_gap_conn_find(event->conn_update.conn_handle, &d) == 0) {
+            capture_event("watch conn_update status=%d itvl=%u(%.1fms) "
+                          "latency=%u timeout=%u",
+                          event->conn_update.status, d.conn_itvl,
+                          d.conn_itvl * 1.25, d.conn_latency,
+                          d.supervision_timeout);
+        }
         return 0;
+    }
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == g_cps_measurement_handle) {
