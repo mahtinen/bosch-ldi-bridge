@@ -20,6 +20,25 @@
  * timestamp, so it never compounds.
  */
 
+/*
+ * NOTE: the counters deliberately restart at zero after a reboot, and are NOT
+ * persisted. That was tried and removed, because it cannot work:
+ *
+ *  - Saving to NVS on a timer means restoring a STALE value. Measured at
+ *    90 rpm with a 60 s save interval, the count came back 75 revolutions
+ *    behind, so the first delta after the reconnect was a huge modular value
+ *    -- the very cadence spike persistence was meant to prevent, now happening
+ *    on every reboot instead of only on some.
+ *  - Saving often enough to be current means an NVS write every few
+ *    revolutions, which is real flash wear for no benefit.
+ *  - RTC memory does not survive the case that matters, a full power cut.
+ *
+ * And it is unnecessary: last_crank_event_time is a uint16 of 1/1024 s, so it
+ * wraps every 64.000 s. Any reconnect gap longer than a minute makes the time
+ * delta ambiguous no matter what the revolution count says, so a conforming
+ * client has to establish a fresh baseline from the first notification of a
+ * new connection. Given that, the value it restarts from does not matter.
+ */
 void crank_model_init(crank_model_t *m, int64_t now_us)
 {
     m->t0_us         = now_us;

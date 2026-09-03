@@ -284,3 +284,39 @@ watchdog never had to fire, so that failure has **not** been reproduced and its
 cause is not established.
 
 If you pause, glance at the LED: three pulses means only the bike is connected.
+
+**Walking out of range while paused is the likelier explanation** for that long
+failure than anything in the firmware: the link dies on supervision timeout,
+the bridge restarts advertising (confirmed in later traces), and whether the
+watch resumes scanning for a sensor gone that long is its decision, not ours.
+
+## Losing power mid-ride
+
+Measured recovery from a reset:
+
+| From `app_main` to | Time |
+|---|---|
+| advertising — the watch can find us again | **0.21 s** |
+| console ready | 1.23 s |
+| bike hunt started | 5.18 s |
+
+The bike side is reliable: the bond persists in NVS and the pinned target
+survives, and reconnection using the stored bond has been observed repeatedly.
+The watch side depends on whether the watch is still scanning, which is the same
+unknown as the pause case.
+
+### The crank counters restart at zero, and that is deliberate
+
+Persisting them was tried and removed. Saving to NVS on a timer restores a
+**stale** value: measured at 90 rpm with a 60 s interval, the count came back 75
+revolutions behind, so the first delta after the reconnect was a huge modular
+value — precisely the cadence spike persistence was meant to prevent, now
+occurring on every reboot rather than only on some. Saving often enough to stay
+current means a flash write every few revolutions, and RTC memory does not
+survive a full power cut, which is the case that matters.
+
+It is also unnecessary. `last_crank_event_time` is a uint16 of 1/1024 s and
+wraps every 64.000 s, so any reconnect gap over a minute makes the time delta
+ambiguous whatever the revolution count says. A conforming client therefore has
+to re-baseline from the first notification of a new connection, and the value it
+restarts from does not matter.
