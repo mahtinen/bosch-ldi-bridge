@@ -23,6 +23,8 @@
 
 #include "esp_err.h"
 
+struct ble_gap_event;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,17 +33,40 @@ extern "C" {
 esp_err_t ldi_client_scan(int32_t duration_ms);
 void      ldi_client_scan_stop(void);
 
-/*
- * Connect to a specific address, e.g. from the scan log.
- * addr_str is "aa:bb:cc:dd:ee:ff"; addr_type is 0 public, 1 random.
+/* ---- inbound links: the eBike connects to US ------------------------
+ *
+ * The bridge never initiates. It advertises the Live Data Service in the
+ * Service Solicitation AD type and the eBike, which is the GAP central in
+ * this profile (spec 2.1.3.4), connects to it -- so the bridge occupies an
+ * accessory slot instead of competing with the phone for the eBike's single
+ * peripheral slot. The three calls below are the arbiter cps_server uses to
+ * tell the bike's link apart from the watch's.
  */
-esp_err_t ldi_client_connect(const char *addr_str, uint8_t addr_type);
 
-/* Connect to the first advertiser whose name contains this substring. */
-esp_err_t ldi_client_connect_by_name(const char *substr);
+/* A new inbound link. Probes the peer for the Live Data Service and, if it
+ * is there, takes ownership of the connection. */
+void ldi_client_offer_inbound(uint16_t conn_handle);
 
+/* Is this connection the bike's? */
+bool ldi_client_owns(uint16_t conn_handle);
+
+/* Handle a forwarded GAP event for the bike link. */
+int  ldi_client_gap_event(struct ble_gap_event *event);
+
+/* Drop the bike link. The bike reconnects on its own (spec 2.1.6.1.3). */
 void ldi_client_disconnect(void);
 bool ldi_client_is_connected(void);
+
+/*
+ * Periodic supervision. Detects a link that is up but has gone silent and
+ * drops it so the bike re-establishes -- a peer that accepts a connection and
+ * then sends nothing is a different failure from one that never connects, and
+ * only this tells them apart.
+ */
+void ldi_client_supervise(void);
+
+/* Notifications received on the current bike link. */
+uint32_t ldi_client_notify_total(void);
 
 /* Toggle the raw notification hex dump. */
 void ldi_client_set_dump(bool on);
@@ -55,31 +80,9 @@ void ldi_client_print_status(void);
 
 /*
  * Called once from the NimBLE host sync callback, with the identity address
- * type the peripheral already resolved.  Does not start scanning: the bike
- * allows exactly one accessory connection, so taking it unbidden would be
- * rude and could mask a real problem.  Drive it from the console.
+ * type the peripheral already resolved.
  */
 void ldi_client_on_sync(uint8_t own_addr_type);
-
-/* ---- autonomous mode -------------------------------------------------
- *
- * The point of this mode is that the bike is not next to the computer. With
- * it on, the board needs no console at all: it scans, picks candidates,
- * connects, verifies the link, subscribes to everything notifiable, and
- * writes it all to the capture partition. The LED reports progress, and the
- * whole session is read back later over serial.
- */
-
-/* Enable/disable the autonomous hunt. Persisted in NVS. */
-void ldi_client_set_auto(bool on);
-bool ldi_client_get_auto(void);
-
-/*
- * Pin a specific peer, so later sessions connect straight to it instead of
- * hunting. Persisted in NVS. Pass NULL to clear.
- */
-esp_err_t ldi_client_set_target(const char *addr_str, uint8_t addr_type);
-bool      ldi_client_get_target(char *out, size_t n);
 
 #ifdef __cplusplus
 }

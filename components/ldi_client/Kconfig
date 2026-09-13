@@ -55,9 +55,58 @@ menu "Bosch bridge"
         default 32
         range 8 128
 
-    config BRIDGE_STALE_MS
-        int "Treat a bike field as stale after this many ms"
-        default 3000
+    config BRIDGE_VALUE_HOLD_MS
+        int "How long a rider power / cadence value stays usable (ms)"
+        default 15000
+        range 1000 120000
+        help
+            LDI omits a field when it has not changed (spec 2.2.4.3), so
+            "no update" means "unchanged", not "gone".
+
+            Measured over two full rides: the bike notifies at ~5.1 Hz, but
+            rider power appears in only 5.3-6.5% of frames and cadence in
+            4.2-5.5% -- one update every 3.0-3.7 s and 3.5-4.8 s respectively,
+            and longer the steadier the riding, because nothing changes.
+
+            The previous value here was 3000, SHORTER than the bike's own
+            spacing, so both fields aged out between legitimate updates and the
+            bridge reported 0 W for roughly half of every ride even with a
+            perfect link. Holding is safe because change is what triggers a
+            send: stopping pedalling, or any new value, arrives promptly. The
+            residual risk this bounds is spec 2.2.3.2 -- a data source that
+            vanishes silently -- and BRIDGE_BIKE_SILENT_MS bounds it further.
+
+    config BRIDGE_BIKE_SILENT_MS
+        int "No LDI frame at all for this long means the bike is gone (ms)"
+        default 8000
+        range 1000 60000
+        help
+            Judged on odometer and standstill, which the bike puts in 100% of
+            frames -- unlike power and cadence. Below this the bridge keeps
+            notifying; above it, it stops entirely rather than sending zeros
+            the watch would record as measurements.
+
+    config BRIDGE_RANDOM_STATIC_ADDR
+        bool "Advertise from a static random address instead of the public one"
+        default y
+        help
+            The eBike sends a connection request that never reaches our host,
+            and afterwards believes itself connected: it stops offering the
+            bridge until the BIKE is power-cycled, while power-cycling the
+            bridge changes nothing. A CONNECT_IND whose address type does not
+            match the advertiser is discarded in the link layer, below HCI --
+            invisible to the peripheral, and leaving the initiator thinking it
+            succeeded. That is this symptom exactly.
+
+            The public address begins 0x9C = 1001 1100. Top two bits 10 is a
+            valid PUBLIC address but not a valid random one (static needs 11).
+            Anything treating it as random produces the failure above; this
+            option sets the top two bits so the address is unambiguous.
+
+            Derived from the public address, so it is stable across reboots.
+            Changing it COSTS THE WATCH ITS PAIRING -- watches key their
+            remembered-sensor list on the address, so forget and re-pair the
+            pod after flipping this either way.
 
     config BRIDGE_LED_GPIO
         int "Status LED GPIO"

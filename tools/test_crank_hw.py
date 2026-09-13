@@ -55,6 +55,10 @@ CASES = [
 ]
 
 drain(1.0)
+# The reset above returns the source to AUTO, which has been the default since
+# the bike side landed -- and AUTO with no bike deliberately sends nothing. The
+# simulator has to be selected explicitly or every case below reads 0 W.
+cmd("source sim")
 cmd("sim script off")
 
 failures = []

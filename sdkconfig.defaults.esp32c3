@@ -16,7 +16,18 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 # ---------- Controller activity slots ---------------------------------
-# "Activities" = 2 connections + scan + adv = 4.  Default 6 leaves headroom
-# at ~828 bytes each.  NOTE: on the C3 these are BT_CTRL_* symbols, not the
-# BTDM_CTRL_* ones the NimBLE examples carry (those are ESP32-classic only).
+# "Activities" are connections, scans and advertising sets, ~828 bytes each:
+#
+#     2 connections (bike + watch)
+#   + 1 advertising set
+#   + 1 scan (console diagnostic)
+#   = 4
+#
+# 6 leaves genuine headroom for the moment an incoming connection is created
+# while advertising is still live. (This briefly needed 9, when two advertising
+# identities and a third connection put the real figure at exactly 6 with
+# nothing spare; both are gone.)
+#
+# NOTE: on the C3 these are BT_CTRL_* symbols, not the BTDM_CTRL_* ones the
+# NimBLE examples carry (those are ESP32-classic only).
 CONFIG_BT_CTRL_BLE_MAX_ACT=6

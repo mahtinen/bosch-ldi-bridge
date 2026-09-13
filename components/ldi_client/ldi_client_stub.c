@@ -11,18 +11,19 @@
 
 esp_err_t ldi_client_scan(int32_t duration_ms) { (void)duration_ms; return ESP_ERR_NOT_SUPPORTED; }
 void      ldi_client_scan_stop(void) {}
-esp_err_t ldi_client_connect(const char *a, uint8_t t) { (void)a; (void)t; return ESP_ERR_NOT_SUPPORTED; }
-esp_err_t ldi_client_connect_by_name(const char *s) { (void)s; return ESP_ERR_NOT_SUPPORTED; }
+
+void      ldi_client_offer_inbound(uint16_t h) { (void)h; }
+bool      ldi_client_owns(uint16_t h) { (void)h; return false; }
+int       ldi_client_gap_event(struct ble_gap_event *ev) { (void)ev; return 0; }
+
 void      ldi_client_disconnect(void) {}
 bool      ldi_client_is_connected(void) { return false; }
+void      ldi_client_supervise(void) {}
+uint32_t  ldi_client_notify_total(void) { return 0; }
+
 void      ldi_client_set_dump(bool on) { (void)on; }
 bool      ldi_client_get_dump(void) { return false; }
-void      ldi_client_print_gatt(void) { printf("LDI central not compiled in\n"); }
-void      ldi_client_print_status(void) { printf("LDI central not compiled in (CONFIG_BRIDGE_ENABLE_LDI=n)\n"); }
+void      ldi_client_print_gatt(void) { printf("LDI accessory not compiled in\n"); }
+void      ldi_client_print_status(void) { printf("LDI accessory not compiled in (CONFIG_BRIDGE_ENABLE_LDI=n)\n"); }
 
 void ldi_client_on_sync(uint8_t own_addr_type) { (void)own_addr_type; }
-
-void      ldi_client_set_auto(bool on) { (void)on; }
-bool      ldi_client_get_auto(void) { return false; }
-esp_err_t ldi_client_set_target(const char *a, uint8_t t) { (void)a; (void)t; return ESP_ERR_NOT_SUPPORTED; }
-bool      ldi_client_get_target(char *out, size_t n) { (void)out; (void)n; return false; }

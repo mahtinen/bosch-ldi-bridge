@@ -95,8 +95,17 @@ def main():
     print("--- merge behaviour ---")
     check("every frame yielded at least one known field", empty == 0,
           "%d empty" % empty)
-    check("unknown fields present and ignored", unknown > 0,
-          "%d ignored (spec 2.2.4.3 requires this)" % unknown)
+    # Spec 2.2.4.3 requires unrecognised fields to be ignored, not rejected.
+    # That is a property of the DECODER, not of the capture -- and a capture
+    # containing none is a perfectly good capture. Asserting unknown > 0 made
+    # this fail against a clean accessory-role session whose frames carried
+    # only the 13 documented fields, which proved nothing about the decoder.
+    if unknown > 0:
+        check("unknown fields ignored rather than rejected", empty == 0,
+              "%d ignored (spec 2.2.4.3)" % unknown)
+    else:
+        print("  --    unknown fields ignored rather than rejected"
+              "            none in this capture")
 
     # The merge test that matters: after the first few frames, all 13 fields
     # should be populated and STAY populated, even though most frames carry

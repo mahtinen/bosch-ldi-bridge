@@ -22,6 +22,25 @@ static const char *TAG = "capture";
  * attribute handle capture_notify() prepends. */
 #define MAX_PAYLOAD 256
 
+/* The largest record capture_write() can ever emit. */
+#define MAX_REC (ALIGN4(sizeof(capture_hdr_t) + MAX_PAYLOAD))
+
+/*
+ * Free space below which capture_init() reclaims the partition.
+ *
+ * Sized from measurement, not taste.  At the shipped 1 Hz payload sampling a
+ * ride costs ~76 bytes per second of riding, so 768 KB is a little under three
+ * hours -- longer than all but the occasional big day, and the 2.4 MB
+ * partition still holds two ordinary rides before any reclaim happens.
+ *
+ * The cost of this threshold is a mid-ride reboot early in a long ride losing
+ * what came before it.  That trade is deliberate: the reset reason, which is
+ * the one thing that pre-reboot log would have explained, is written into the
+ * BOOT marker immediately afterwards, and covering the remaining hours matters
+ * more than covering the first ten minutes twice.
+ */
+#define CAPTURE_MIN_FREE (768 * 1024)
+
 static const esp_partition_t *s_part;
 static size_t   s_off;          /* append point */
 static uint32_t s_records;
@@ -138,6 +157,30 @@ esp_err_t capture_init(void)
              100.0 * s_off / s_part->size);
 
     /*
+     * Reclaim here, at boot, or not at all.
+     *
+     * A log that cannot cover the ride about to start is worth less than the
+     * ride about to start, and leaving that judgement to the rider does not
+     * work: the partition filled on 2026-09-05 and every session for the next
+     * week -- including a five-hour ride whose power recording failed -- wrote
+     * nothing, silently, while `capture status` still said "ready: yes".
+     *
+     * Boot is the only safe moment for it. Erasing mid-ride would mean
+     * destroying records at exactly the instant the design promises to keep
+     * them, which is the failure mode the append-only layout exists to avoid.
+     */
+    bool reclaimed = false;
+    if (s_part->size - s_off < CAPTURE_MIN_FREE) {
+        ESP_LOGW(TAG, "only %u bytes free (< %u) -- reclaiming the partition",
+                 (unsigned)(s_part->size - s_off), (unsigned)CAPTURE_MIN_FREE);
+        if (capture_erase() == ESP_OK) {
+            reclaimed = true;
+        } else {
+            ESP_LOGE(TAG, "reclaim FAILED -- this session will not be logged");
+        }
+    }
+
+    /*
      * Record WHY we booted.  A session that ends away from the computer leaves
      * only the log to explain itself, and the difference between a brownout, a
      * panic and a clean restart is the difference between a power problem and a
@@ -153,9 +196,10 @@ esp_err_t capture_init(void)
     const char *why = ((unsigned)rr < sizeof(reasons) / sizeof(reasons[0]))
                       ? reasons[rr] : "?";
 
-    char ver[64];
-    int n = snprintf(ver, sizeof(ver), "boot reset=%s(%d) heap=%u",
-                     why, (int)rr, (unsigned)esp_get_free_heap_size());
+    char ver[96];
+    int n = snprintf(ver, sizeof(ver), "boot reset=%s(%d) heap=%u%s",
+                     why, (int)rr, (unsigned)esp_get_free_heap_size(),
+                     reclaimed ? " (log was full, reclaimed)" : "");
     capture_write(CAP_REC_BOOT, (uint8_t)rr, ver, (uint16_t)(n > 0 ? n : 0));
 
     if (rr == ESP_RST_BROWNOUT) {
@@ -167,7 +211,12 @@ esp_err_t capture_init(void)
 
 bool capture_ready(void)
 {
-    return s_part != NULL && s_off < s_part->size;
+    return s_part != NULL && (s_off + MAX_REC) <= s_part->size;
+}
+
+bool capture_full(void)
+{
+    return !capture_ready();
 }
 
 void capture_stats(size_t *used, size_t *total, uint32_t *records)
@@ -200,12 +249,20 @@ esp_err_t capture_write(capture_rec_type_t type, uint8_t flags,
     esp_err_t err = ESP_OK;
 
     if (s_off + reclen > s_part->size) {
-        /* Full. Say so once, then stay quiet. */
-        static bool warned;
-        if (!warned) {
-            warned = true;
-            ESP_LOGW(TAG, "capture partition FULL at %u records -- "
-                          "run `capture erase`", (unsigned)s_records);
+        /*
+         * Full.  Repeat the warning on a slow timer rather than once ever:
+         * a single line emitted hours earlier, on a board that spends its
+         * life on a power bank with nothing reading the serial port, is
+         * indistinguishable from no warning at all.  That is how this went
+         * unnoticed for a week.
+         */
+        static int64_t last_warn_us;
+        int64_t now = esp_timer_get_time();
+        if (last_warn_us == 0 || (now - last_warn_us) > 60 * 1000 * 1000) {
+            last_warn_us = now;
+            ESP_LOGW(TAG, "capture partition FULL at %u records -- nothing is "
+                          "being logged; run `capture erase`",
+                     (unsigned)s_records);
         }
         err = ESP_ERR_NO_MEM;
         goto out;
@@ -273,7 +330,8 @@ esp_err_t capture_event(const char *fmt, ...)
     return capture_write(CAP_REC_EVENT, 0, line, (uint16_t)n);
 }
 
-esp_err_t capture_notify(uint16_t attr_handle, const void *data, uint16_t len)
+esp_err_t capture_notify(uint16_t attr_handle, const void *data, uint16_t len,
+                         uint8_t skipped)
 {
     uint8_t buf[2 + MAX_PAYLOAD];
     if (len > MAX_PAYLOAD - 2) {
@@ -284,7 +342,7 @@ esp_err_t capture_notify(uint16_t attr_handle, const void *data, uint16_t len)
     if (len && data) {
         memcpy(&buf[2], data, len);
     }
-    return capture_write(CAP_REC_NOTIFY, 0, buf, (uint16_t)(len + 2));
+    return capture_write(CAP_REC_NOTIFY, skipped, buf, (uint16_t)(len + 2));
 }
 
 esp_err_t capture_adv(const uint8_t addr[6], uint8_t addr_type, int8_t rssi,
@@ -394,7 +452,11 @@ void capture_dump(bool hex_payloads)
         case CAP_REC_NOTIFY:
             if (h.len >= 2) {
                 uint16_t handle = (uint16_t)(p[0] | (p[1] << 8));
-                printf("handle=%u len=%u\n", handle, h.len - 2);
+                /* "skipped" keeps the true notification rate recoverable from
+                 * a log that only stores every Nth payload -- without it the
+                 * sampled stream silently understates the bike by 5x. */
+                printf("handle=%u len=%u skipped=%u\n", handle, h.len - 2,
+                       h.flags);
                 if (hex_payloads && h.len > 2) {
                     print_hex(p + 2, h.len - 2, "                     ");
                 }

@@ -22,3 +22,14 @@ __pycache__/
 compile_commands.json
 *.swp
 Thumbs.db
+
+# Capture dumps read off the board. Large, machine-specific, not history.
+captures/
+
+# Recorded activities. Ride data from the watch and the Flow app: useful for
+# diagnosing a session, personal, and not something to publish with the code.
+*.fit
+*.FIT
+
+# Android bug reports, pulled to read the phone's Bluetooth HCI log.
+bugreport*.zip

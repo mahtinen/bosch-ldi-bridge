@@ -4,6 +4,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "capture.h"
 
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -44,6 +45,8 @@ static void verify_timeout_ev_cb(struct ble_npl_event *ev)
      * failure, and say why.
      */
     if (!s_q.dle_event_seen) {
+        capture_event("DLE UNVERIFIED: no DATA_LEN_CHG in %d ms",
+                      CONFIG_BRIDGE_LINK_VERIFY_TIMEOUT_MS);
         ESP_LOGE(TAG, "DLE UNVERIFIED: no DATA_LEN_CHG in %d ms. "
                       "Payloads may truncate at 20 bytes.",
                  CONFIG_BRIDGE_LINK_VERIFY_TIMEOUT_MS);
@@ -67,7 +70,7 @@ static int on_mtu_exchanged(uint16_t conn_handle,
     (void)arg;
 
     if (error != NULL && error->status != 0) {
-        ESP_LOGW(TAG, "MTU exchange failed status=%d", error->status);
+        capture_event("MTU exchange FAILED status=%d", error->status);
         return 0;
     }
 
@@ -86,6 +89,8 @@ static int on_mtu_exchanged(uint16_t conn_handle,
     s_q.mtu_ok  = (readback >= CONFIG_BRIDGE_MIN_ATT_MTU);
     s_q.t_mtu_us = esp_timer_get_time();
 
+    capture_event("ATT MTU negotiated = %u %s (min %d)", s_q.att_mtu,
+                  s_q.mtu_ok ? "ok" : "TOO SMALL", CONFIG_BRIDGE_MIN_ATT_MTU);
     ESP_LOGI(TAG, "ATT MTU = %u (%s, minimum %d)", s_q.att_mtu,
              s_q.mtu_ok ? "ok" : "TOO SMALL", CONFIG_BRIDGE_MIN_ATT_MTU);
     return 0;

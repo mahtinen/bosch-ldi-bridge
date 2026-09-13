@@ -28,6 +28,21 @@ typedef struct {
  */
 void cps_source_get(cps_source_sample_t *out);
 
+/*
+ * Is there a data source at all right now?
+ *
+ * Deliberately NOT the same question as sample.valid, which asks whether the
+ * latest reading is fresh.  A rider coasting produces a source that is present
+ * and reporting zero; a bike that is switched off, out of range, or holding
+ * its one accessory slot open for something else produces no source at all.
+ *
+ * Those two were indistinguishable on the wire until now, and the cost was
+ * concrete: on 2026-09-12 the bridge notified 0 W at 1 Hz for five hours with
+ * no bike attached, and the watch wrote every one of those zeros into the
+ * activity as though they had been measured.
+ */
+bool cps_source_present(void);
+
 #ifdef __cplusplus
 }
 #endif

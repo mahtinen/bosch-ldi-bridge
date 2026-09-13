@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_app_desc.h"
 #include "esp_mac.h"
 
 #include "host/ble_hs.h"
@@ -16,9 +17,13 @@ static const char *TAG = "cps_gatt";
 
 uint16_t g_cps_measurement_handle;
 uint16_t g_cps_control_point_handle;
+uint16_t g_csc_measurement_handle;
 
 /* Serial number, derived from the eFuse MAC at init. */
 static char s_serial[13];
+
+/* Firmware revision, built at init from the app descriptor. */
+static char s_fw_rev[DIS_FIRMWARE_REV_MAX];
 
 /* ------------------------------------------------------------------ */
 /*  Access callbacks                                                   */
@@ -33,6 +38,27 @@ static int cps_access_measurement(uint16_t conn_handle, uint16_t attr_handle,
 {
     (void)conn_handle; (void)attr_handle; (void)ctxt; (void)arg;
     return BLE_ATT_ERR_READ_NOT_PERMITTED;
+}
+
+/* CSC Measurement is notify-only, exactly as CP Measurement is. */
+static int csc_access_measurement(uint16_t conn_handle, uint16_t attr_handle,
+                                  struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle; (void)attr_handle; (void)ctxt; (void)arg;
+    return BLE_ATT_ERR_READ_NOT_PERMITTED;
+}
+
+static int csc_access_feature(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle; (void)attr_handle; (void)arg;
+
+    /* uint16 here -- CP Feature is uint32. Mixing them up is the standard
+     * copy-paste bug between these two services. */
+    uint8_t buf[2];
+    put_le16(buf, CSC_FEATURE_VALUE);
+    int rc = os_mbuf_append(ctxt->om, buf, sizeof(buf));
+    return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 static int cps_access_feature(uint16_t conn_handle, uint16_t attr_handle,
@@ -137,6 +163,31 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
         },
     },
     {
+        /* ---- Cycling Speed and Cadence Service 0x1816 --------------- */
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(CSC_SVC_UUID16),
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {
+                .uuid       = BLE_UUID16_DECLARE(CSC_CHR_MEASUREMENT_UUID16),
+                .access_cb  = csc_access_measurement,
+                .val_handle = &g_csc_measurement_handle,
+                .flags      = BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                .uuid      = BLE_UUID16_DECLARE(CSC_CHR_FEATURE_UUID16),
+                .access_cb = csc_access_feature,
+                .flags     = BLE_GATT_CHR_F_READ,
+            },
+            /*
+             * No Sensor Location and no SC Control Point.  Both are optional
+             * while Multiple Sensor Locations and Wheel Revolution Data are
+             * unsupported, and the Control Point exists mainly to let a client
+             * Set Cumulative Value on wheel revolutions we do not have.
+             */
+            { 0 },
+        },
+    },
+    {
         /* ---- Device Information Service 0x180A ---------------------- */
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = BLE_UUID16_DECLARE(DIS_SVC_UUID16),
@@ -162,7 +213,15 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid      = BLE_UUID16_DECLARE(DIS_CHR_FIRMWARE_REV_UUID16),
                 .access_cb = dis_access_str,
-                .arg       = (void *)DIS_FIRMWARE_REVISION,
+                .arg       = s_fw_rev,
+                .flags     = BLE_GATT_CHR_F_READ,
+            },
+            {
+                /* Same string as 0x2A26: which of the two an app shows is
+                 * not pinned down by the spec, so publish both. */
+                .uuid      = BLE_UUID16_DECLARE(DIS_CHR_SOFTWARE_REV_UUID16),
+                .access_cb = dis_access_str,
+                .arg       = s_fw_rev,
                 .flags     = BLE_GATT_CHR_F_READ,
             },
             { 0 },
@@ -202,6 +261,58 @@ size_t cps_gatt_pack_measurement(uint8_t *buf, size_t buflen, int16_t power_w,
     }
 
     return off;
+}
+
+size_t csc_gatt_pack_measurement(uint8_t *buf, size_t buflen,
+                                 uint16_t cum_crank_rev,
+                                 uint16_t last_crank_evt_1024)
+{
+    if (buflen < CSC_MEAS_MAX_LEN) {
+        return 0;
+    }
+
+    /*
+     * Crank only.  Wheel revolution data, if it were ever set, would come
+     * FIRST -- ascending flag-bit order, same rule as CPS -- so the crank
+     * fields are written at an offset derived from the flags rather than
+     * hardcoded, for the same reason.
+     */
+    const uint8_t flags = CSC_MEAS_FLAG_CRANK_REV_DATA; /* 0x02 */
+    size_t off = 0;
+
+    buf[off] = flags; off += 1;
+
+    if (flags & CSC_MEAS_FLAG_WHEEL_REV_DATA) {
+        off += 6; /* uint32 cumulative wheel revs + uint16 last event time */
+    }
+    if (flags & CSC_MEAS_FLAG_CRANK_REV_DATA) {
+        put_le16(&buf[off], cum_crank_rev);       off += 2;
+        put_le16(&buf[off], last_crank_evt_1024); off += 2;
+    }
+
+    return off;
+}
+
+void csc_gatt_notify(uint16_t conn_handle, uint16_t cum_crank_rev,
+                     uint16_t last_crank_evt_1024)
+{
+    uint8_t buf[CSC_MEAS_MAX_LEN];
+    size_t len = csc_gatt_pack_measurement(buf, sizeof(buf), cum_crank_rev,
+                                           last_crank_evt_1024);
+    if (len == 0) {
+        return;
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(buf, (uint16_t)len);
+    if (om == NULL) {
+        ESP_LOGW(TAG, "csc notify: out of mbufs");
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(conn_handle, g_csc_measurement_handle, om);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "csc notify rc=%d", rc);
+    }
 }
 
 void cps_gatt_notify(uint16_t conn_handle, int16_t power_w,
@@ -281,12 +392,44 @@ static void cps_gatt_selftest(void)
         }
     }
 
-    /* Feature and location, as a scanner would read them. */
+    /*
+     * The same crank values through the CSC packer.
+     *
+     * Checked against CPS on every boot because the two formats are similar
+     * enough to confuse and different enough to matter: CSC's flags field is
+     * uint8 where CPS's is uint16, so a shared packer -- or a copied one --
+     * silently shifts both crank values by a byte and the watch reads garbage
+     * cadence with no error anywhere.
+     */
+    for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+        uint8_t cbuf[CSC_MEAS_MAX_LEN];
+        size_t clen = csc_gatt_pack_measurement(cbuf, sizeof(cbuf),
+                                                vectors[i].rev, vectors[i].evt);
+        /* The crank pair must be byte-identical to the CPS one, just without
+         * the flags/power prefix: CPS puts it at offset 4, CSC at offset 1. */
+        uint8_t pbuf[CPS_MEAS_MAX_LEN];
+        size_t plen = cps_gatt_pack_measurement(pbuf, sizeof(pbuf),
+                                                vectors[i].power,
+                                                vectors[i].rev, vectors[i].evt);
+        bool ok = (clen == CSC_MEAS_MAX_LEN) && (plen == CPS_MEAS_MAX_LEN) &&
+                  (cbuf[0] == CSC_MEAS_FLAG_CRANK_REV_DATA) &&
+                  (memcmp(&cbuf[1], &pbuf[4], 4) == 0);
+        all_ok = all_ok && ok;
+        ESP_LOGI(TAG, "selftest CSC[%u] %02X %02X %02X %02X %02X  %s",
+                 (unsigned)i, cbuf[0], cbuf[1], cbuf[2], cbuf[3], cbuf[4],
+                 ok ? "ok" : "MISMATCH");
+    }
+
+    /* Features and location, as a scanner would read them. */
     uint8_t f[4];
     put_le32(f, CPS_FEATURE_VALUE);
-    ESP_LOGI(TAG, "selftest 0x2A65 feature   = %02X %02X %02X %02X (expect 08 00 00 00)",
+    ESP_LOGI(TAG, "selftest 0x2A65 CP feature  = %02X %02X %02X %02X (expect 08 00 00 00)",
              f[0], f[1], f[2], f[3]);
-    ESP_LOGI(TAG, "selftest 0x2A5D location  = %02X (expect 00 = Other)",
+    uint8_t cf[2];
+    put_le16(cf, CSC_FEATURE_VALUE);
+    ESP_LOGI(TAG, "selftest 0x2A5C CSC feature = %02X %02X (expect 02 00, crank only)",
+             cf[0], cf[1]);
+    ESP_LOGI(TAG, "selftest 0x2A5D location    = %02X (expect 00 = Other)",
              CPS_SENSOR_LOCATION_OTHER);
 
     if (all_ok) {
@@ -300,6 +443,16 @@ static void cps_gatt_selftest(void)
 /*  Init                                                               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The exact string the eBike (and eBike Flow) reads as the accessory software
+ * version. Exposed so the console can print it: comparing what Flow shows
+ * against what the board says is the only way to be certain the bike is
+ * talking to the build that was just flashed, rather than a cached record.
+ */
+const char *cps_gatt_firmware_revision(void)
+{
+    return s_fw_rev;
+}
 esp_err_t cps_gatt_init(void)
 {
     int rc;
@@ -310,6 +463,54 @@ esp_err_t cps_gatt_init(void)
         (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
     }
     snprintf(s_serial, sizeof(s_serial), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+
+    /*
+     * Firmware revision: `git describe` plus a short ELF hash.
+     *
+     * The version alone is not enough during development -- it does not change
+     * between rebuilds of uncommitted work, and the point of surfacing this in
+     * eBike Flow is to answer "is the bike talking to the build I just
+     * flashed?". The build timestamp from the app descriptor looked like the
+     * answer and is not: date and time come from __DATE__/__TIME__ baked into
+     * esp_app_desc.c, which only recompiles when that file does, so it sat
+     * unchanged across separate flashes.
+     *
+     * The ELF SHA-256 changes whenever anything in the image changes, which is
+     * exactly the property required.
+     */
+    const esp_app_desc_t *app = esp_app_get_description();
+    char sha[9] = "????????";
+    (void)esp_app_get_elf_sha256(sha, sizeof(sha));
+
+    /*
+     * TWENTY CHARACTERS, hard limit.
+     *
+     * eBike Flow showed "v1.0.0-3-g08165e2-di" for a 32-character string: the
+     * eBike reads Device Information at the default 23-byte ATT MTU -- before
+     * the exchange that raises it -- and does not follow up with a Read Blob,
+     * so anything past 20 bytes is simply lost. A version that silently
+     * truncates is worse than a short one, because the part that identifies
+     * the build is at the end.
+     *
+     * So: base version, '*' if the tree was dirty, and the ELF hash. At a
+     * clean tag that is "2.0.0+e7730a59" -- 14 characters, with the unique
+     * part intact.
+     */
+    const char *v = (app != NULL) ? app->version : "unknown";
+    if (*v == 'v') {
+        v++;                      /* git describe prefixes tags with 'v' */
+    }
+    char base[12];
+    size_t i = 0;
+    while (v[i] != '\0' && v[i] != '-' && i < sizeof(base) - 1) {
+        base[i] = v[i];
+        i++;
+    }
+    base[i] = '\0';
+
+    snprintf(s_fw_rev, sizeof(s_fw_rev), "%s%s+%s",
+             base, strstr(v, "dirty") ? "*" : "", sha);
+    ESP_LOGI(TAG, "firmware revision string: \"%s\"", s_fw_rev);
 
     /*
      * Register GAP (0x1800) and GATT (0x1801).  The blecsc example skips

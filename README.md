@@ -21,11 +21,13 @@ Purion 200 (BRC3800) control unit, paired to a Suunto Race S.
 | Feature | State |
 |---|---|
 | Cycling Power Service peripheral | works — watch pairs as a Power pod |
+| Cycling Speed and Cadence Service | built, crank-only; not advertised by default and not needed |
 | Rider power and cadence in the recorded activity | **verified** |
 | Bosch LDI client (bond, encrypt, MTU/DLE verify) | works |
 | Protobuf decode of all 13 LDI fields | works, validated against 644 real frames |
 | Flash capture log for diagnostics | works |
-| Reconnect after link loss, bond persistence | works |
+| Accessory role — bike connects to us, per spec | **built, not yet tested against a bike** |
+| Coexisting with the eBike Flow app | follows from the above; unconfirmed |
 
 See [Known limitations](#known-limitations) before relying on it.
 
@@ -42,7 +44,11 @@ unusual happened, which means power feeds native training-load and power-zone
 features rather than being logged as an inert side channel.
 
 Cadence rides along inside CPS as crank revolution data, so **one pairing
-delivers both channels** — no second sensor.
+delivers both channels** — no second sensor, and one power pod covers every
+sport mode. A Cycling Speed and Cadence Service (`0x1816`) is also implemented
+and left in the GATT database, but it is not advertised and is not needed; see
+[Known limitations](#known-limitations) for the sport-mode behaviour that
+briefly made it look necessary.
 
 ## Hardware
 
@@ -82,15 +88,20 @@ cycling activity. That is normal.
 
 ### 2. Pair the bike
 
-Put the bike into accessory pairing mode from the **eBike Flow** app, then over
-the serial console:
+Open the **eBike Flow** app and add the bridge from its accessory menu. Nothing
+is needed on the serial console — the bridge advertises the Live Data Service as
+a *solicitation* ("connect to me, I want this") and the bike, which is the GAP
+central in this profile, connects to it.
 
-```
-bridge> bike auto on
-```
+That direction matters. Connecting to the bike as a central instead — which this
+project did originally — takes the bike's single peripheral slot, the one the
+Flow app uses, and the two then lock each other out. Registering as a proper
+accessory puts the bridge somewhere else entirely, so **you can ride with your
+phone and the Flow app running**. See
+[Connection direction](docs/LDI-PROTOCOL.md) for the measurements.
 
-The bridge finds the bike, bonds, and verifies the link. Bonds persist in NVS, so
-this is a one-time step — afterwards it reconnects on its own.
+Bonds persist in NVS, so this is a one-time step. Reconnection afterwards is the
+bike's job: switch it on and it comes looking.
 
 ### 3. Ride
 
@@ -102,7 +113,7 @@ The onboard LED reports state without needing a console:
 |---|---|
 | solid | booting |
 | **1 pulse** | advertising, nothing connected |
-| **2 pulses** | watch connected, not yet subscribed |
+| **2 pulses** | watch connected, **but nothing is being sent to it** |
 | **3 pulses** | bike connected and link verified |
 | solid + heartbeat blink | both connected — everything working |
 | solid + longer dropout | streaming **simulated** data |
@@ -111,16 +122,26 @@ The onboard LED reports state without needing a console:
 Pulse counts rather than blink rates, so a state can be counted rather than
 judged.
 
+**Two pulses is the one to notice mid-ride.** It means the watch is attached and
+the bridge has no bike data to give it, so nothing is being recorded. It covers
+both "not subscribed yet" and "the bike went away".
+
 ## How it works
 
-Two BLE roles at once on one radio: a **central** subscribing to the bike, and a
-**peripheral** advertising to the watch. NimBLE routes each connection's events
-to whichever callback created that link, so the roles never need
-demultiplexing.
+One BLE role, two peers. The bridge is a **peripheral** to both: it advertises
+the Cycling Power service for the watch and the Live Data Service *as a
+solicitation* for the bike, in a single 25-byte advertisement, and waits. The
+watch connects because it wants a power meter; the bike connects because the
+profile makes it the central and the bridge is asking to be its accessory.
+
+Because both arrive through the same advertisement, the two links have to be
+told apart: on each new connection the bridge looks for the Live Data Service on
+the peer. Found means bike, and it becomes a GATT **client** on a connection it
+did not initiate — which is exactly what the profile specifies.
 
 ```
 components/
-  ldi_client/      BLE central -> bike: scan, bond, verify, subscribe
+  ldi_client/      bike link: identify, bond, verify, subscribe, decode
   ble_link_verify/ ATT MTU and LE Data Length negotiation, and verification
   ldi_proto/       protobuf wire scanner + LDI field mapping
   bike_state/      the 13 decoded fields, with per-field timestamps
@@ -147,11 +168,14 @@ field is omitted when unchanged (spec 2.2.4.3), and which unchanged fields get
 included anyway is explicitly not guaranteed (LDI-002). Absence therefore means
 *unchanged*, not *zero*.
 
-**Stale data is reported as zero, never held.** The spec warns that when a data
-source disappears the bike sends no notification at all — the last value simply
-stands, indistinguishable from fresh. Holding it would write a plateau into the
-workout that never happened, and the rider cannot notice because watches do not
-display the sensor name.
+**Three questions, not one, about whether a value is usable.** "Is the bike
+there?" is answered by the age of a field the bike sends in *every* frame
+(odometer, standstill). "Is the rider stopped?" is answered by the standstill
+flag, which the bike states outright. Only "is this value current?" is a
+timeout — and it is sized *above* the bike's own update spacing for power and
+cadence, which is 3.0–4.8 s. A single 3 s window for all three is what wrote
+16,499 invented zeros into a 5 h 53 activity. When the bike is absent entirely
+the bridge stops notifying, so the watch records a gap rather than a lie.
 
 ## Diagnostics
 
@@ -170,6 +194,13 @@ than overwrite. It records advertisements, the GATT map, link-quality results,
 pairing outcome, every notification payload, and a once-a-minute liveness marker
 with uptime, free heap and reset reason.
 
+Never mid-ride, though: when less than 768 KB is free **at boot**, the partition
+is reclaimed and the new session's `BOOT` marker says so. A ride costs roughly 76
+bytes per second of riding, so 2.4 MB holds two ordinary rides, and reclaiming at
+boot keeps the erase away from the one moment the append-only layout exists to
+survive. Before that rule existed the partition filled and then stayed full for a
+week — silently, while `capture status` still reported `ready: yes`.
+
 Host-side tools read it back:
 
 | Tool | Purpose |
@@ -178,6 +209,7 @@ Host-side tools read it back:
 | `tools/ride_profile.py` | summarise a capture as a ride profile |
 | `tools/uptime.py` | per-session duration and **why each session ended** |
 | `tools/test_ldi_decode.py` | replay real frames through the field mapping |
+| `tools/test_staleness.py` | replay a capture through the old and new power/cadence gating |
 | `tools/test_crank_model.py` | validate the 1/1024 s crank arithmetic, no hardware |
 | `tools/test_crank_hw.py` | same, driving a connected board |
 | `tools/test_capture_hw.py` | flash log survival across power cycles |
@@ -238,6 +270,38 @@ free from bosch-ebike.com → Service → Downloads → LiveData and drop it in
   discoverable, and logs the watch's disconnect reason and subscribe reason so
   the cause can be identified. If you pause, glance at the LED afterwards: three
   pulses means only the bike is connected.
+- **A sport mode connects a sensor only if one of its screens displays that
+  sensor's data.** On a Suunto Race S the pod attaches in eMTB and MTB but not
+  in Cycling or eBiking — and the cause is not sensor types, service UUIDs or
+  appearance values, all of which we chased. Those modes simply had no screen
+  field showing power or cadence, so there was nothing to connect a power pod
+  *for*. **Add a power or cadence field to a screen** — a custom sport mode
+  based on normal biking is enough — and the pod attaches.
+
+  Worth knowing because the symptom is badly misleading: the capture log shows
+  the watch connecting and subscribing in the failing mode, while the watch's
+  own Connected pods list stays empty. One power pod covers every sport mode
+  once the fields are there.
+- **Untested against a bike in the accessory role.** The bridge now advertises
+  with service solicitation and waits to be connected to, as the spec requires.
+  That has been verified only as far as the hardware allows without a bike:
+  the advertisement fits the 31-byte budget and goes out with the solicitation
+  UUID present. Whether v19's accessory registration completes end to end is
+  still unconfirmed — Bosch marks the whole interface experimental.
+
+  What this replaced is measured, though. Connecting to the bike as a central
+  cost the 2026-09-12 ride most of its data: the Flow app and the bridge were
+  *perfectly complementary* over 5 h 53, never once both holding data in the
+  same minute, because they were fighting over the bike's one peripheral slot.
+  A bench test confirmed first-come-first-served with no eviction.
+- **A missing bike records a gap, not zeros.** When no LDI frame has arrived for
+  8 s the bridge stops notifying rather than sending 0 W, so the watch records
+  nothing instead of recording invented zeros. Every CP Measurement carries an
+  Instantaneous Power field, so there is no way to transmit "no data" — silence
+  is the only honest encoding. A 5 h 53 ride on 2026-09-12 wrote 16,499 of those
+  zeros into its activity, indistinguishable from freewheeling. The link stays up
+  throughout (an idle ATT link does not disconnect), so the watch keeps the
+  sensor and simply shows a hole.
 - **One watch at a time.** The CPS server tracks a single connection, so a watch
   *and* a head unit cannot both read it simultaneously. Fixable by iterating an
   array of subscribers.

@@ -70,8 +70,17 @@ def parse(buf):
     return out
 
 
-def load_frames(path, want_handle):
-    """Pull (t_ms, payload) for RX records on the given attribute handle."""
+def load_frames(path, want_handle, with_skipped=False):
+    """Pull (t_ms, payload) for RX records on the given attribute handle.
+
+    With with_skipped=True, yields (t_ms, payload, skipped) instead, where
+    skipped is how many notifications the capture's sampling interval dropped
+    before this one. That count is what makes the TRUE notification rate
+    recoverable: the log stores roughly one frame a second out of about five,
+    so field-presence percentages read off the frames alone understate how
+    often the bike actually sends -- which is exactly the arithmetic needed to
+    tell an on-change field apart from a dead link.
+    """
     raw = open(path, encoding="utf-8", errors="replace").read()
     # The serial path emits CR CR LF, which splitlines() turns into a
     # blank line between every record. Drop them so hexdump lines stay
@@ -80,11 +89,15 @@ def load_frames(path, want_handle):
     frames = []
     i = 0
     while i < len(text):
-        m = re.match(r"^(\d+)\s+RX\s+handle=(\d+) len=(\d+)", text[i].rstrip())
+        m = re.match(r"^(\d+)\s+RX\s+handle=(\d+) len=(\d+)"
+                     r"(?: skipped=(\d+))?", text[i].rstrip())
         if not m:
             i += 1
             continue
         t_ms, handle = int(m.group(1)), int(m.group(2))
+        # Absent in logs written before the count moved into the record
+        # header; treat those as unknown rather than as zero skips.
+        skipped = int(m.group(4)) if m.group(4) is not None else None
         data = bytearray()
         j = i + 1
         while j < len(text):
@@ -94,7 +107,8 @@ def load_frames(path, want_handle):
             data += bytes(int(x, 16) for x in hm.group(1).split())
             j += 1
         if handle == want_handle and data:
-            frames.append((t_ms, bytes(data)))
+            frames.append((t_ms, bytes(data), skipped) if with_skipped
+                          else (t_ms, bytes(data)))
         i = j if j > i else i + 1
     return frames
 
@@ -107,14 +121,36 @@ def main():
     if "--handle" in sys.argv:
         handle = int(sys.argv[sys.argv.index("--handle") + 1])
 
-    frames = load_frames(path, handle)
+    sampled = load_frames(path, handle, with_skipped=True)
+    frames = [(t, p) for t, p, _ in sampled]
     print("frames on handle %d: %d" % (handle, len(frames)))
     if not frames:
         sys.exit("no frames found")
 
     span = (frames[-1][0] - frames[0][0]) / 1000.0
-    print("time span: %.1f s  (%.2f Hz)"
+    print("time span: %.1f s  (captured %.2f Hz)"
           % (span, len(frames) / span if span else 0))
+
+    # The captured frames are a sample, so quote the real rate alongside it.
+    # Without this the "seen" column below reads as a rate when it is only a
+    # sampling fraction -- the mistake that makes an on-change field look like
+    # a broken one.
+    skips = [s for _, _, s in sampled]
+    total = None
+    if span and all(s is not None for s in skips) and any(skips):
+        total = len(frames) + sum(skips)
+        print("true notification rate: %.2f Hz  (%d sent, %d captured, "
+              "%d dropped by sampling)"
+              % (total / span, total, len(frames), sum(skips)))
+    elif not span:
+        pass
+    else:
+        # Either the log predates the counter, or it is a mix of old and new
+        # records, or every payload really was captured. Refusing to guess is
+        # the point: quoting the sampled rate as if it were the real one is how
+        # a field sent every 3.7 s reads as a field sent every 21 s.
+        print("true notification rate: unknown -- no per-record skip counts "
+              "(pre-2026-09 log, or CAPTURE_PAYLOAD_MS=0)")
 
     # Merge partial updates, and record each field's history.
     state = {}
@@ -158,6 +194,15 @@ def main():
             note = "varies"
         elif distinct == 1:
             note = "constant"
+
+        # How often the bike actually SENDS this field, scaled back up through
+        # the sampling ratio. A field carried in every frame and one carried in
+        # 5% of them both merely count as "seen", and only this number
+        # separates "the link died" from "the value did not change" -- the
+        # distinction the 2026-09-12 ride turned on.
+        if total:
+            every_s = span * len(frames) / float(len(series) * total)
+            note = "~every %.1fs, %s" % (every_s, note)
 
         print("%-6d %-6s %-7d %12d %12d %10d  %s"
               % (fnum, wire, len(vals), lo, hi, distinct, note))

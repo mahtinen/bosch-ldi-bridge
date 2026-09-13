@@ -96,6 +96,22 @@
  * produced them. */
 #define LDI_SCHEMA_VERSION 1
 
+/* ---- The Live Data Service UUID, in advertisable form ------------------ */
+
+/*
+ * 0000eb20-eaa2-11e9-81b4-2a2ae2dbcce4, little-endian as BLE carries it.
+ *
+ * This is what goes in the Service Solicitation UUIDs AD type (0x15), which
+ * spec 2.1.5.3.1 requires of an accessory: the accessory advertises that it
+ * WANTS this service, and the eBike -- which is the GAP central in this
+ * profile (2.1.3.4) -- connects to it. The bridge spent its first life doing
+ * the reverse, which is why it fought the phone for the eBike's single
+ * peripheral slot instead of taking one of the several accessory slots.
+ */
+#define LDI_SVC_LIVEDATA_UUID128                                          \
+    BLE_UUID128_INIT(0xe4, 0xcc, 0xdb, 0xe2, 0x2a, 0x2a, 0xb4, 0x81,      \
+                     0xe9, 0x11, 0xa2, 0xea, 0x20, 0xeb, 0x00, 0x00)
+
 /*
  * Does this UUID equal ebike_uuid(short)?
  *

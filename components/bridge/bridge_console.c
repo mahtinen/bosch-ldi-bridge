@@ -18,9 +18,11 @@
 #include "bridge_console.h"
 #include "bridge.h"
 #include "cps_server.h"
+#include "cps_gatt.h"
+#include "cps_source.h"
 #include "capture.h"
 #include "data_source.h"
-#include "ldi_auto.h"
+#include "ldi_uuids.h"
 #include "ldi_client.h"
 #include "sim_source.h"
 #include "status_led.h"
@@ -50,12 +52,32 @@ static int cmd_status(int argc, char **argv)
     int bond_count = 0;
     (void)ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &bond_count);
 
+    size_t cap_used = 0, cap_total = 0;
+    uint32_t cap_recs = 0;
+    capture_stats(&cap_used, &cap_total, &cap_recs);
+
+    bool sub_power = false, sub_cadence = false;
+    (void)cps_server_subscriptions(&sub_power, &sub_cadence);
+
+    printf("firmware        : %s\n", cps_gatt_firmware_revision());
     printf("watch connected : %s\n", cps_server_is_connected() ? "yes" : "no");
-    printf("notifying       : %s\n", cps_server_is_notifying() ? "yes" : "no");
+    printf("subscribed      : power=%s cadence=%s\n",
+           sub_power ? "yes" : "no", sub_cadence ? "yes" : "no");
+    /*
+     * Two separate questions, and conflating them is what made a five-hour
+     * data outage invisible: the watch can be subscribed while the bridge is
+     * deliberately sending nothing because there is no bike to relay.
+     */
+    printf("sending data    : %s\n",
+           cps_source_present() ? "yes"
+                                : "no -- SUSPENDED, no data source");
     printf("source          : %s (mode %s, sim phase %s)\n",
            data_source_active_name(),
            data_source_mode_name(data_source_get_mode()),
            sim_source_phase_name());
+    printf("capture log     : %lu records, %s\n",
+           (unsigned long)cap_recs,
+           capture_full() ? "FULL -- nothing is being logged" : "ok");
     printf("led state       : %s\n", status_led_state_name(status_led_get()));
     printf("bonds stored    : %d\n", bond_count);
     printf("-- bike side --\n");
@@ -163,26 +185,25 @@ static int cmd_scan(int argc, char **argv)
 static int cmd_bike(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("usage: bike connect <aa:bb:cc:dd:ee:ff> [addr_type]\n"
-               "       bike name <substring>     connect to a scanned name\n"
-               "       bike disconnect\n"
+        /*
+         * No connect command any more, deliberately.  The bridge is a GAP
+         * peripheral now and the eBike is the central, so there is nothing to
+         * connect TO -- and the old `bike connect` is exactly the behaviour
+         * that took the phone's slot and cost a five-hour ride its data.
+         * Register the bridge from eBike Flow's accessory menu instead.
+         */
+        printf("usage: bike disconnect            drop the link; the bike "
+               "reconnects\n"
                "       bike gatt                 discovered services/chrs\n"
                "       bike dump on|off          raw notification hex dump\n"
-               "       bike auto on|off          hunt unattended (persisted)\n"
-               "       bike target <addr> [type] pin a peer (persisted)\n"
-               "       bike target clear\n"
-               "       bike unblacklist\n"
-               "       bike status\n");
+               "       bike status\n"
+               "\n"
+               "The bridge advertises the Live Data Service as a solicitation\n"
+               "and waits for the bike to connect. Pair it once from the\n"
+               "eBike Flow app's accessory menu.\n");
         return 1;
     }
 
-    if (strcmp(argv[1], "connect") == 0 && argc >= 3) {
-        uint8_t type = (argc >= 4) ? (uint8_t)atoi(argv[3]) : 0;
-        return ldi_client_connect(argv[2], type) == ESP_OK ? 0 : 1;
-    }
-    if (strcmp(argv[1], "name") == 0 && argc >= 3) {
-        return ldi_client_connect_by_name(argv[2]) == ESP_OK ? 0 : 1;
-    }
     if (strcmp(argv[1], "disconnect") == 0) {
         ldi_client_disconnect();
         return 0;
@@ -196,29 +217,8 @@ static int cmd_bike(int argc, char **argv)
         printf("raw dump %s\n", ldi_client_get_dump() ? "on" : "off");
         return 0;
     }
-    if (strcmp(argv[1], "auto") == 0 && argc >= 3) {
-        ldi_client_set_auto(strcmp(argv[2], "on") == 0);
-        return 0;
-    }
-    if (strcmp(argv[1], "target") == 0 && argc >= 3) {
-        if (strcmp(argv[2], "clear") == 0) {
-            ldi_client_set_target(NULL, 0);
-            return 0;
-        }
-        uint8_t type = (argc >= 4) ? (uint8_t)atoi(argv[3]) : 0;
-        if (ldi_client_set_target(argv[2], type) != ESP_OK) {
-            printf("bad address (want aa:bb:cc:dd:ee:ff)\n");
-            return 1;
-        }
-        return 0;
-    }
-    if (strcmp(argv[1], "unblacklist") == 0) {
-        ldi_auto_clear_blacklist();
-        return 0;
-    }
     if (strcmp(argv[1], "status") == 0) {
         ldi_client_print_status();
-        ldi_auto_print_status();
         return 0;
     }
 
@@ -239,7 +239,10 @@ static int cmd_capture(int argc, char **argv)
         printf("capture used    : %u / %u bytes (%.1f%%)\n",
                (unsigned)used, (unsigned)total,
                total ? 100.0 * used / total : 0.0);
-        printf("capture ready   : %s\n", capture_ready() ? "yes" : "NO");
+        printf("capture free    : %u bytes\n", (unsigned)(total - used));
+        printf("capture ready   : %s\n",
+               capture_ready() ? "yes"
+                               : "NO -- FULL, nothing is being logged");
         if (argc < 2) {
             printf("usage: capture status | dump | dump short | erase\n");
         }

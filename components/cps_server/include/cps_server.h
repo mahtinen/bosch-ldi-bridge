@@ -12,6 +12,9 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "host/ble_uuid.h"
+
+struct ble_gap_event;
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +43,46 @@ bool cps_server_is_notifying(void);
  * shape of that failure.
  */
 void cps_server_adv_watchdog(void);
+
+/*
+ * The bike and the watch now arrive through the SAME advertisement, so a new
+ * connection has to be attributed to one of them.
+ *
+ * cps_server deliberately does not know how: it offers each inbound link to an
+ * arbiter the supervisor installs, asks who owns a handle before dispatching
+ * an event, and forwards the events it does not own.  That keeps the watch
+ * side ignorant of the bike side, which is what let the two halves be built
+ * and debugged independently.
+ */
+typedef struct {
+    void (*offer)(uint16_t conn_handle);        /* a new inbound link      */
+    bool (*owns)(uint16_t conn_handle);         /* is it yours?            */
+    int  (*handle)(struct ble_gap_event *ev);   /* then deal with this     */
+} cps_link_arbiter_t;
+
+void cps_server_set_link_arbiter(const cps_link_arbiter_t *arb);
+
+/*
+ * The 128-bit service UUID to advertise in the Service Solicitation AD type,
+ * i.e. "connect to me, I want this".  NULL leaves it out.
+ */
+void cps_server_set_solicit_uuid(const ble_uuid128_t *uuid);
+
+/* How many inbound links are up, across both peers. */
+int cps_server_conn_count(void);
+
+/* Is the radio advertising at this instant? */
+bool cps_server_is_advertising(void);
+
+/*
+ * Which of the two measurement characteristics the watch actually subscribed
+ * to.  Worth distinguishing: a watch that takes CSC but not CPS records
+ * cadence and no power, which looks like a half-broken sensor unless the
+ * status line says outright which one it asked for.
+ *
+ * Returns false if no watch is connected.
+ */
+bool cps_server_subscriptions(bool *power, bool *cadence);
 
 /* Terminate the watch link.  Advertising restarts from the disconnect event. */
 void cps_server_disconnect(void);

@@ -142,15 +142,64 @@ subscribing is a full snapshot; after that only changes arrive.
 replaces state per frame blanks most of it every second. Measured: about 8 of 13
 fields per frame.
 
+#### How often each field actually arrives
+
+Measured across two full rides (2026-09-04 and 2026-09-05, 4,351 sampled frames).
+The notification rate itself is **~5.1 Hz**, recovered from the per-record
+skipped counter — the capture stores roughly one frame a second, so raw
+field-presence percentages understate the bike by about 5×.
+
+| field | in % of frames | i.e. sent about |
+|---|---|---|
+| odometer, standstill, lock, charger, light flags | 100 % | every frame |
+| speed | 29–32 % | every 0.7 s |
+| time | 25–28 % | every 0.7 s |
+| **rider power** | **5.3–6.5 %** | **every 3.0–3.7 s** |
+| **cadence** | **4.2–5.5 %** | **every 3.5–4.8 s** |
+
+The two fields this project exists to relay are the two the bike sends most
+rarely, and the spacing gets *worse* the steadier the riding, because nothing
+changes. Any freshness window applied to them has to be sized against these
+numbers, not against the notification rate. `tools/decode_ldi.py` prints this
+table for any capture.
+
+The fields at 100 % are the useful ones for answering "is the bike there at
+all", which is why `cps_source_present()` keys off odometer age rather than
+power age.
+
 ### Staleness has no indicator
 
 Spec 2.2.3.2 warns that when a data source disappears — a battery disconnected,
 say — the bike sends **no notification and no indication**. The last value simply
 stands, stale and indistinguishable from fresh.
 
-This implementation timestamps every field individually and reports 0 W once a
-field goes stale rather than holding it, because holding would write a plateau
-into the workout that never happened.
+This implementation asks three separate questions rather than one, because
+conflating them is what cost the 2026-09-12 ride most of its data:
+
+| question | answered by | window |
+|---|---|---|
+| is the bike there at all? | odometer / standstill age — fields in **100 %** of frames | `BRIDGE_BIKE_SILENT_MS` (8 s) |
+| is the rider stopped? | the **standstill flag**, stated outright in every frame | — |
+| is this value still usable? | rider power / cadence age | `BRIDGE_VALUE_HOLD_MS` (15 s) |
+
+When the first is false the bridge stops notifying entirely rather than
+transmitting zeros the watch would record as measurements (see the notify tick
+in `cps_server.c`). When the second is true, zero is a measurement rather than a
+guess. Only the third is a timeout, and it is now sized **above** the bike's own
+update spacing instead of below it.
+
+The previous design used a single 3 s window for all three. Against fields the
+bike sends every 3.0–4.8 s, that zeroed rider power and cadence *between
+legitimate updates* — roughly half of every ride, on a perfectly healthy link.
+Replaying two real captures through both rules (`tools/test_staleness.py`)
+recovers 2.5–3.7× more seconds of genuine power, and those are lower bounds: the
+capture stores one frame in five, so the firmware sees five times the updates the
+replay does.
+
+Holding is safe because **change is what triggers a send**. Easing off, stopping
+pedalling, or any new value arrives on its own; only the steady state goes quiet.
+The one case a hold cannot detect is 2.2.3.2's silent disappearance, and the
+8 s link check bounds that to a few seconds of held value.
 
 ### Cadence can be negative, and is sign-extended
 
@@ -214,6 +263,65 @@ Internal consistency check: the 445 W burst occurs at **27.2 km/h**, above the
 25 km/h assist cutoff, where the motor stops assisting and the rider supplies all
 of it.
 
+## Connection direction — the bridge is the peripheral
+
+The spec is explicit (§2.1.3.4):
+
+> The accessory **shall** use the GAP peripheral role.
+> The eBike **shall** use the GAP central role.
+
+and §2.1.5.3.1 requires the accessory to advertise the Live Data Service UUID in
+the **Service Solicitation UUIDs** AD type (0x15). The v19 release notes agree:
+"The eBike acts as a GAP Central and GATT Server, providing live data to
+connected accessories."
+
+The bridge originally did the reverse — scan for the bike and connect to it as a
+central. That works: bonded, encrypted, streaming. But it takes the eBike's
+single **peripheral** slot, which is the one the eBike Flow app uses, and the two
+then fight over it.
+
+**Measured, 2026-09-12.** A Flow recording and a bridge recording of the same
+5 h 53 ride are perfectly complementary — never once do both hold data in the
+same minute. Flow held the slot for the first 1 h 48; the bridge got in only
+after Flow's link died at 08:35:39 and lost it again at 09:14:48. A bench test
+confirmed the mechanism: force-close Flow and the bridge connects; open Flow
+while the bridge holds the link and Flow cannot see the bike at all; power-cycle
+the bridge and Flow takes it instantly, after which the bridge is locked out
+until Flow is force-closed again. First-come-first-served, no eviction.
+
+Accessories are not supposed to be in that queue. §2.1.3.3:
+
+> This profile does not impose any concurrency limitations or restrictions for
+> the accessory and the eBike. In cases where there are **multiple accessories**
+> or other Bluetooth components connected to the eBike, limitations... might
+> occur.
+
+So the bridge now advertises and waits. One legacy advertisement serves both
+peers:
+
+| advert | bytes | scan response | bytes |
+|---|---|---|---|
+| Flags | 3 | Complete Local Name | 12 |
+| 128-bit solicitation, `ebike_uuid(eb20)` | 18 | Appearance `0x0484` | 4 |
+| 16-bit svc UUID `0x1818` (CPS) | 4 | TX power | 3 |
+| **total** | **25 / 31** | **total** | **19 / 31** |
+
+Name and appearance in the scan response is explicitly permitted (§2.1.5.3.2,
+§2.1.5.3.3 say "advertising data **or** scan response data"), so both peers must
+scan actively. `0x0484` is Cycling, category 18 — one of the three categories the
+eBike UI matches, so the bridge gets a bicycle icon rather than a generic one.
+
+**Telling the two peers apart.** Both now arrive through the same advertisement,
+so the free demultiplexing NimBLE gave us — each connection routed to whichever
+callback created it — is gone. On every inbound link the bridge discovers the
+Live Data Service on the peer: found means bike, not found means watch. That
+needs no stored address, works on the first connection before any bond exists,
+and a per-connection discovery is mandatory anyway (§2.1.5.5 forbids persisting
+handles).
+
+**Reconnection is the bike's job now** (§2.1.6.1.3). The bridge only keeps
+advertising while a connection slot is free.
+
 ## Open questions
 
 - **The control channel** (`00000010`) sends a 65-byte non-protobuf frame at
@@ -222,11 +330,8 @@ of it.
   handshake lives — this implementation never replies, and Flow never lists the
   bridge as an accessory, though data flows regardless.
 - **The seven other services** are unexplored.
-- **Connection direction.** The spec has the accessory *advertise* with service
-  solicitation for `ebike_uuid(eb20)` while acting as the GATT *client*, with the
-  bike initiating the connection. This implementation does the reverse and
-  connects as a central. It works — bonded, encrypted, streaming — but is not the
-  specified flow, and is the likeliest reason Flow does not register it.
+- ~~**Connection direction.**~~ **Resolved, and it was not cosmetic.** See
+  "Connection direction" below.
 
 
 ---

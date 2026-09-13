@@ -5,7 +5,9 @@
 #include "ble_link_verify.h"
 #include "capture.h"
 #include "cps_server.h"
+#include "cps_source.h"
 #include "ldi_client.h"
+#include "ldi_uuids.h"
 #include "sim_source.h"
 #include "status_led.h"
 
@@ -15,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "esp_bt.h"
 
 #include "host/ble_hs.h"
 #include "nimble/nimble_port.h"
@@ -47,15 +50,13 @@ static void bridge_on_sync(void)
     cps_server_start_adv();
 
     /*
-     * The central half.  It registers its OWN gap callback when it scans or
-     * connects, entirely separate from the peripheral's -- NimBLE routes each
-     * connection's events to whichever callback created that link, so the two
-     * roles never need demultiplexing and there is no "if (role == MASTER)"
-     * anywhere in this firmware.
-     *
-     * Scanning is not started automatically: the bike allows exactly one
-     * accessory connection, so grabbing it unbidden would be rude and could
-     * mask a real problem. Drive it from the console with `scan`.
+     * The bike half.  Both peers now arrive through the one advertisement --
+     * the watch because it carries the Cycling Power service UUID, the eBike
+     * because it carries the Live Data Service as a solicitation -- so the
+     * free demultiplexing NimBLE used to give us (each connection routed to
+     * whichever callback created it) is gone.  Ownership is arbitrated
+     * instead, and the wiring lives here so neither half has to know about
+     * the other.
      */
     ldi_client_on_sync(cps_server_own_addr_type());
 
@@ -90,8 +91,9 @@ static void bridge_status_timer_cb(void *arg)
      * Pulse counts, so a state can be read by counting rather than by judging
      * a blink rate.
      */
-    /* Cheap, and the one thing that recovers a watch that wandered off. */
+    /* Cheap, and the one thing that recovers a peer that wandered off. */
     cps_server_adv_watchdog();
+    ldi_client_supervise();
 
     bool watch = cps_server_is_connected();
     bool bike  = ldi_client_is_connected();
@@ -103,9 +105,18 @@ static void bridge_status_timer_cb(void *arg)
         /* Bike present: degraded if the link could not be verified, since a
          * truncated protobuf stream is worse than an obvious failure. */
         want = ble_link_verify_is_ok() ? STATUS_BIKE_ONLY : STATUS_DEGRADED;
-    } else if (cps_server_is_notifying()) {
+    } else if (data_source_get_mode() == DATA_SOURCE_SIM &&
+               cps_server_is_notifying()) {
         want = STATUS_SIMULATING; /* streaming synthetic data to the watch */
     } else if (watch) {
+        /*
+         * Watch attached, nothing feeding it.  This used to read SIMULATING,
+         * because the test was "is the watch subscribed" rather than "is the
+         * simulator the source" -- so the 2026-09-12 ride spent five hours
+         * claiming to stream fake data while auto mode was in fact streaming
+         * zeros from an absent bike.  Two pulses is the state that matters
+         * here, and it already means exactly this.
+         */
         want = STATUS_WATCH_ONLY;
     } else {
         want = STATUS_ADVERTISING;
@@ -131,10 +142,17 @@ static void bridge_uptime_cb(void *arg)
     (void)arg;
 
     int64_t up_s = esp_timer_get_time() / 1000000;
-    capture_event("alive up=%llds heap=%u watch=%d bike=%d",
+    /*
+     * adv= answers "did the peer stop finding us, or did we stop advertising".
+     * Those two are indistinguishable in a log read back after the fact, and
+     * they need completely different fixes.
+     */
+    capture_event("alive up=%llds heap=%u watch=%d bike=%d src=%d adv=%d",
                   (long long)up_s, (unsigned)esp_get_free_heap_size(),
                   cps_server_is_connected() ? 1 : 0,
-                  ldi_client_is_connected() ? 1 : 0);
+                  ldi_client_is_connected() ? 1 : 0,
+                  cps_source_present() ? 1 : 0,
+                  cps_server_is_advertising() ? 1 : 0);
 }
 
 static void bridge_heartbeat_cb(void *arg)
@@ -155,17 +173,22 @@ static void bridge_heartbeat_cb(void *arg)
     capture_stats(&cap_used, &cap_total, &cap_recs);
 
     ESP_LOGI(TAG, "STATE watch=%d notify=%d bike=%d phase=%-11s "
-                  "power=%4dW rev=%5u evt=%5u cap=%lurec",
+                  "power=%4dW rev=%5u evt=%5u cap=%lurec%s",
              cps_server_is_connected() ? 1 : 0,
              cps_server_is_notifying() ? 1 : 0,
              ldi_client_is_connected() ? 1 : 0,
              sim_source_phase_name(), (int)power, rev, evt,
-             (unsigned long)cap_recs);
+             (unsigned long)cap_recs, capture_full() ? " LOG-FULL" : "");
 
-    ESP_LOGI(TAG, "      src=%s(%s) mode=%s",
+    bool sub_power = false, sub_cadence = false;
+    (void)cps_server_subscriptions(&sub_power, &sub_cadence);
+
+    ESP_LOGI(TAG, "      src=%s(%s) mode=%s notifying=%s sub=[pwr=%d cad=%d]",
              data_source_active_name(),
              ldi_client_is_connected() ? "bike-linked" : "no-bike",
-             data_source_mode_name(data_source_get_mode()));
+             data_source_mode_name(data_source_get_mode()),
+             cps_source_present() ? "yes" : "SUSPENDED (no source)",
+             sub_power ? 1 : 0, sub_cadence ? 1 : 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -202,6 +225,29 @@ esp_err_t bridge_start(void)
 
     ESP_ERROR_CHECK(nimble_port_init());
 
+    /*
+     * Turn the transmitter up to maximum.
+     *
+     * This was never set, so the controller ran at its +9 dBm default while
+     * the ESP32-C3 supports +20 -- eleven decibels left unused on a board
+     * whose PCB antenna is the weakest part of it. Discovery by the eBike has
+     * been unreliable throughout (found immediately sometimes, not at all
+     * others, across power cycles of both devices), which is what marginal RF
+     * looks like rather than a protocol fault.
+     *
+     * Costs current, which is the helpful direction here: the documented risk
+     * on a USB power bank is the bank cutting out BELOW ~50-100 mA.
+     */
+    esp_err_t pwr = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P20);
+    if (pwr == ESP_OK) {
+        pwr = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P20);
+    }
+    if (pwr != ESP_OK) {
+        ESP_LOGW(TAG, "could not raise TX power: %s", esp_err_to_name(pwr));
+    } else {
+        ESP_LOGI(TAG, "BLE TX power set to +20 dBm");
+    }
+
     ble_hs_cfg.reset_cb        = bridge_on_reset;
     ble_hs_cfg.sync_cb         = bridge_on_sync;
     /* Round-robin eviction when the bond table fills, so a device that has
@@ -231,14 +277,38 @@ esp_err_t bridge_start(void)
     ble_hs_cfg.sm_sc      = 1; /* LESC when the peer supports it; NimBLE
                                 * falls back to legacy pairing on its own */
     /*
-     * LTK only.  Deliberately NOT distributing the IRK: it exists to resolve
-     * private addresses, and we use a stable public address with no privacy,
-     * so exchanging IRKs buys nothing and costs a stored object per bond.
+     * LTK and IRK.
+     *
+     * The IRK looks pointless here -- it exists to resolve private addresses
+     * and we advertise a stable public one -- and this distributed ENC alone
+     * on exactly that reasoning. But the eBike is the central in this profile
+     * and decides what a bond looks like, and a working third-party LDI
+     * accessory (Xunil99/ha-bosch-ebike) distributes ENC | ID. Matching it
+     * costs one stored object per bond and removes a variable from a pairing
+     * that currently fails.
      */
-    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC;
-    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC |
+                                   BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC |
+                                   BLE_SM_PAIR_KEY_DIST_ID;
 
     ESP_ERROR_CHECK(cps_server_init());
+
+    /*
+     * Advertise that we want the eBike Live Data Service, and tell the
+     * peripheral half who to hand a connection to once it turns out to be the
+     * bike.  cps_server stays ignorant of the bike, ldi_client stays ignorant
+     * of advertising, and the knowledge that they share one radio lives here.
+     */
+    static const ble_uuid128_t ldi_uuid = LDI_SVC_LIVEDATA_UUID128;
+    cps_server_set_solicit_uuid(&ldi_uuid);
+
+    static const cps_link_arbiter_t arbiter = {
+        .offer  = ldi_client_offer_inbound,
+        .owns   = ldi_client_owns,
+        .handle = ldi_client_gap_event,
+    };
+    cps_server_set_link_arbiter(&arbiter);
 
     /* Must come after the GATT registration and before the host task. */
     ble_store_config_init();

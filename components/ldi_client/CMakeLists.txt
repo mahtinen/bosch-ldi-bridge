@@ -5,7 +5,7 @@
 # vanish from the include path -- presenting as a missing header even though
 # the symbol is y and the component exists.
 if(CONFIG_BRIDGE_ENABLE_LDI)
-    set(srcs "ldi_client.c" "ldi_auto.c")
+    set(srcs "ldi_client.c")
 else()
     set(srcs "ldi_client_stub.c")
 endif()

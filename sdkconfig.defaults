@@ -35,14 +35,27 @@ CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 # Two links: the bike and the watch.
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
 
-# Legacy advertising only.  The Suunto Race S scans legacy 1M PHY when it
-# looks for a power pod; extended advertising would make us invisible to it.
+# ---------- Legacy advertising only ----------------------------------
+# There was briefly a second advertising identity, to work around a Suunto
+# Race S attaching the pod in eMTB but not in normal Cycling. That turned out
+# not to be about sensor typing at all: the watch connects a sensor only when
+# the active sport mode has a screen field displaying its data. One power pod
+# covers every mode once the fields are there, so the second identity -- and
+# the extended advertising, third connection slot and derived random address
+# it required -- has been removed.
 CONFIG_BT_NIMBLE_EXT_ADV=n
 
 # ---------- MTU / Data Length Extension ------------------------------
 # 247 ATT payload + 4 bytes L2CAP header = 251 = max LL payload with DLE.
 # Larger only buys L2CAP fragmentation.  IDF default is 256.
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+
+# Service Solicitation (AD type 0x15) is gated behind this in ble_hs_adv.c.
+# Without it the accessory advertisement silently loses the one AD structure
+# that tells the eBike to connect to us -- and ble_gap_adv_set_fields() still
+# returns 0, so nothing anywhere reports a problem. Pinned here rather than
+# left to the sdkconfig default, so a fullclean cannot quietly drop it.
+CONFIG_BT_NIMBLE_EXTRA_ADV_FIELDS=y
 # C3 default is 12 blocks of 256 B.  Two links both running large PDUs.
 CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=20
 
