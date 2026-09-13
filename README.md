@@ -26,8 +26,8 @@ Purion 200 (BRC3800) control unit, paired to a Suunto Race S.
 | Bosch LDI client (bond, encrypt, MTU/DLE verify) | works |
 | Protobuf decode of all 13 LDI fields | works, validated against 644 real frames |
 | Flash capture log for diagnostics | works |
-| Accessory role — bike connects to us, per spec | **built, not yet tested against a bike** |
-| Coexisting with the eBike Flow app | follows from the above; unconfirmed |
+| Accessory role — bike connects to us, per spec | **verified** — the bike registers it |
+| Coexisting with the eBike Flow app | works — Flow stays connected while the bridge streams |
 
 See [Known limitations](#known-limitations) before relying on it.
 
@@ -99,6 +99,11 @@ Flow app uses, and the two then lock each other out. Registering as a proper
 accessory puts the bridge somewhere else entirely, so **you can ride with your
 phone and the Flow app running**. See
 [Connection direction](docs/LDI-PROTOCOL.md) for the measurements.
+
+The bike searches on its own schedule, so the bridge does not always show up on
+the first scan — search again if it does not. Once it appears, Flow lists it by
+name and MAC and shows its firmware version, which is the running build's
+`<version>+<hash>`, so you can confirm what the bike is actually talking to.
 
 Bonds persist in NVS, so this is a one-time step. Reconnection afterwards is the
 bike's job: switch it on and it comes looking.
@@ -282,34 +287,21 @@ free from bosch-ebike.com → Service → Downloads → LiveData and drop it in
   the watch connecting and subscribing in the failing mode, while the watch's
   own Connected pods list stays empty. One power pod covers every sport mode
   once the fields are there.
-- **Untested against a bike in the accessory role.** The bridge now advertises
-  with service solicitation and waits to be connected to, as the spec requires.
-  That has been verified only as far as the hardware allows without a bike:
-  the advertisement fits the 31-byte budget and goes out with the solicitation
-  UUID present. Whether v19's accessory registration completes end to end is
-  still unconfirmed — Bosch marks the whole interface experimental.
-
-  What this replaced is measured, though. Connecting to the bike as a central
-  cost the 2026-09-12 ride most of its data: the Flow app and the bridge were
-  *perfectly complementary* over 5 h 53, never once both holding data in the
-  same minute, because they were fighting over the bike's one peripheral slot.
-  A bench test confirmed first-come-first-served with no eviction.
+- **Discovery from the Flow app can take several attempts.** The bike scans on
+  its own schedule, so the bridge does not always appear on the first search.
+  Searching again, or power-cycling the bike, finds it. Once registered this
+  does not recur — reconnection is automatic and does not involve the app.
 - **A missing bike records a gap, not zeros.** When no LDI frame has arrived for
   8 s the bridge stops notifying rather than sending 0 W, so the watch records
   nothing instead of recording invented zeros. Every CP Measurement carries an
   Instantaneous Power field, so there is no way to transmit "no data" — silence
-  is the only honest encoding. A 5 h 53 ride on 2026-09-12 wrote 16,499 of those
-  zeros into its activity, indistinguishable from freewheeling. The link stays up
-  throughout (an idle ATT link does not disconnect), so the watch keeps the
-  sensor and simply shows a hole.
-- **One watch at a time.** The CPS server tracks a single connection, so a watch
-  *and* a head unit cannot both read it simultaneously. Fixable by iterating an
-  array of subscribers.
-- **eBike Flow does not list the bridge as an accessory.** The specification
-  wants the accessory to *advertise* with service solicitation and let the bike
-  connect; this implementation connects to the bike as a central instead. It
-  bonds, encrypts and streams correctly, but Flow never registers it. Cosmetic
-  so far.
+  is the only honest encoding. A 5 h 53 ride wrote 16,499 of those zeros into its
+  activity, indistinguishable from freewheeling. The link stays up throughout (an
+  idle ATT link does not disconnect), so the watch keeps the sensor and simply
+  shows a hole.
+- **One watch at a time.** The controller is built for two connection slots and
+  the bike holds one, so a watch *and* a head unit cannot both read the bridge.
+  Raising `BT_NIMBLE_MAX_CONNECTIONS` would lift it; nothing else assumes two.
 - **Motor power is deliberately unused.** An undocumented field carries a second
   power-shaped channel, almost certainly motor output. The spec requires clients
   to ignore unrecognised fields, and using it would record motor output as rider
